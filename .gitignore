@@ -1,0 +1,31 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments / Conda envs
+.venv/
+.conda/
+conda-env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environment files
+.env
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Project-generated data
+# Uncomment if you generate large raw datasets locally
+# data/dblp_raw/
+# data/lfr_raw/
