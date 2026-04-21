@@ -2,17 +2,16 @@
 
 ## Setup notes
 
-The project now installs cleanly without the optional `hp-mocd` PyPI package.
-That package is not always available on Windows/Python combinations, so the
-baseline runner falls back to `MinimalNSGAII` automatically when `hp-mocd` is
-missing.
+The project now uses the official `pymocd` package for HP-MOCD. The baseline
+runner still keeps `MinimalNSGAII` as a fallback so the project remains usable
+if the package is unavailable on a given machine.
 
 ### Recommended install workflow
 
 1. Create or activate a Conda environment on your `D:` drive. (Optional)
 2. Install the project dependencies with `pip install -r requirements.txt`.
-3. If you want to try the official `hp-mocd` package separately, install it
-   only after confirming it is available for your platform.
+3. The HP-MOCD implementation is provided by `pymocd`, so the baseline code
+   will use `pymocd.HpMocd(...)` automatically when it is installed.
 
 If `pip` reports a temporary disk-space error, move `PIP_CACHE_DIR`, `TEMP`,
 and `TMP` to a folder on `D:` and retry with `--no-cache-dir`.

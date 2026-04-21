@@ -1,14 +1,14 @@
 """
 baseline/hp_mocd_baseline.py
 ────────────────────────────
-Thin wrapper around the official hp-mocd Python package.
+Thin wrapper around the official `pymocd` Python package.
 
-The hp-mocd package is the open-source Rust/PyO3 implementation
-released alongside the paper. It exposes a networkx-compatible API.
+`pymocd` is the open-source Rust/PyO3 implementation released alongside
+the paper. It exposes a NetworkX-compatible API.
 
-Install:  pip install hp-mocd
+Install:  pip install pymocd
 
-Docs:     https://hp-mocd.readthedocs.io   (or the GitHub README)
+Docs:     https://oliveira-sh.github.io/dpymocd/
 """
 
 import time
@@ -21,14 +21,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Official package — install via: pip install hp-mocd
+# Official package — install via: pip install pymocd
 try:
-    import hp_mocd
+    import pymocd
     HAS_HPMOCD = True
 except ImportError:
+    pymocd = None
     HAS_HPMOCD = False
-    print("[WARNING] hp-mocd package not found. "
-          "Run: pip install hp-mocd")
+    print("[WARNING] pymocd package not found. "
+          "Run: pip install pymocd")
 
 from config import HPMOCD_CONFIG
 
@@ -65,25 +66,34 @@ def run_hp_mocd(
 
     t0 = time.perf_counter()
 
-    result = hp_mocd.detect(
+    model = pymocd.HpMocd(
         G,
-        population_size  = cfg["population_size"],
-        max_generations  = cfg["max_generations"],
-        crossover_prob   = cfg["crossover_prob"],
-        mutation_prob    = cfg["mutation_prob"],
-        ensemble_size    = cfg["ensemble_size"],
-        n_threads        = cfg["n_threads"],
+        debug_level=0,
+        pop_size=cfg["population_size"],
+        num_gens=cfg["max_generations"],
+        cross_rate=cfg["crossover_prob"],
+        mut_rate=cfg["mutation_prob"],
     )
+
+    result = model.run()
 
     runtime = time.perf_counter() - t0
 
-    # result.best_partition — list of sets (the Q(C)-selected solution)
-    # result.pareto_front   — list of list of sets
-    best = [frozenset(c) for c in result.best_partition]
-    pareto = (
-        [[frozenset(c) for c in part] for part in result.pareto_front]
-        if return_pareto else None
-    )
+    # `run()` returns a node -> community partition dict.
+    communities: dict[int, set] = {}
+    for node, cid in result.items():
+        communities.setdefault(cid, set()).add(node)
+    best = [frozenset(c) for c in communities.values()]
+
+    pareto: list[list[frozenset]] | None = None
+    if return_pareto and hasattr(model, "generate_pareto_front"):
+        front = model.generate_pareto_front()
+        pareto = []
+        for partition, _objectives in front:
+            grouped: dict[int, set] = {}
+            for node, cid in partition.items():
+                grouped.setdefault(cid, set()).add(node)
+            pareto.append([frozenset(c) for c in grouped.values()])
 
     print(f"[HP-MOCD] communities={len(best)}, runtime={runtime:.2f}s")
     return best, pareto, runtime
@@ -225,13 +235,7 @@ if __name__ == "__main__":
 
     G, gt = load_lfr_disjoint()
 
-    if HAS_HPMOCD:
-        best, _, rt = run_hp_mocd(G)
-    else:
-        print("Using MinimalNSGAII fallback ...")
-        t0 = time.perf_counter()
-        best = MinimalNSGAII(G).run()
-        rt = time.perf_counter() - t0
+    best, _, rt = run_hp_mocd(G)
 
     print(f"Detected {len(best)} communities in {rt:.2f}s")
     print(f"Ground truth: {len(gt)} communities")

@@ -2,10 +2,8 @@
 networkx>=3.2
 igraph>=0.11
 
-# HP-MOCD package is currently optional because it may be unavailable on some
-# Windows/Python combinations. The project includes a MinimalNSGAII fallback
-# in baseline/hp_mocd_baseline.py.
-# hp-mocd
+# Official HP-MOCD Python package (Rust backend, exposed as `pymocd`)
+pymocd>=3.0.0
 
 # Evolutionary / optimization
 pymoo>=0.6.1           # NSGA-II, NSGA-III implementations
