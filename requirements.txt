@@ -23,3 +23,16 @@ tqdm
 # Visualization (optional but useful)
 matplotlib>=3.8
 seaborn>=0.13
+
+
+"""
+May use:
+python -m venv .venv
+.venv\Scripts\Activate.ps1     # PowerShell
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r requirements.txt
+
+verify:
+python -c "import networkx as nx; print('networkx', nx.__version__)"
+python -c "import numpy as np; print('numpy', np.__version__)"
+"""

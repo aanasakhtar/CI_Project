@@ -7,22 +7,56 @@ Source: https://snap.stanford.edu/data/com-DBLP.html
 """
 
 import gzip
-import os
 import random
 import urllib.request
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 
 import networkx as nx
 from config import DBLP_CONFIG
 
 
+def _resolve_working_url(candidates: list[str]) -> str:
+    """Return the first reachable URL from candidates, or raise last error."""
+    last_error: Exception | None = None
+    for url in candidates:
+        req = urllib.request.Request(url, method="HEAD")
+        try:
+            with urllib.request.urlopen(req, timeout=20):
+                return url
+        except Exception as e:  # HTTPError / URLError / timeout
+            last_error = e
+
+    if last_error is None:
+        raise RuntimeError("No DBLP URL candidates provided")
+    raise last_error
+
+
 def _download(url: str, dest: Path) -> None:
-    if not dest.exists():
-        print(f"Downloading {url} ...")
-        urllib.request.urlretrieve(url, dest)
-        print(f"  Saved to {dest}")
-    else:
-        print(f"  Already cached: {dest}")
+    def _is_gzip_ok(path: Path) -> bool:
+        try:
+            # Read through the file to ensure gzip integrity (EOF marker present).
+            with gzip.open(path, "rb") as fh:
+                for _ in iter(lambda: fh.read(1 << 20), b""):
+                    pass
+            return True
+        except Exception:
+            return False
+
+    if dest.exists():
+        if _is_gzip_ok(dest):
+            print(f"  Already cached: {dest}")
+            return
+        else:
+            print(f"  Warning: cached file appears corrupted, re-downloading: {dest}")
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+
+    print(f"Downloading {url} ...")
+    urllib.request.urlretrieve(url, dest)
+    print(f"  Saved to {dest}")
 
 
 def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
@@ -44,8 +78,27 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
     graph_gz  = save_dir / "com-DBLP.ungraph.txt.gz"
     cmty_gz   = save_dir / "com-DBLP.all.cmty.txt.gz"
 
-    _download(cfg["url_graph"], graph_gz)
-    _download(cfg["url_cmty"],  cmty_gz)
+    graph_candidates = [
+        cfg.get("url_graph", ""),
+        "https://snap.stanford.edu/data/bigdata/communities/com-dblp.ungraph.txt.gz",
+        "https://snap.stanford.edu/data/com-dblp.ungraph.txt.gz",
+        "https://snap.stanford.edu/data/com-DBLP.ungraph.txt.gz",
+    ]
+    cmty_candidates = [
+        cfg.get("url_cmty", ""),
+        "https://snap.stanford.edu/data/bigdata/communities/com-dblp.all.cmty.txt.gz",
+        "https://snap.stanford.edu/data/com-dblp.all.cmty.txt.gz",
+        "https://snap.stanford.edu/data/com-DBLP.all.cmty.txt.gz",
+    ]
+
+    graph_candidates = [u for u in graph_candidates if u]
+    cmty_candidates = [u for u in cmty_candidates if u]
+
+    graph_url = _resolve_working_url(graph_candidates)
+    cmty_url = _resolve_working_url(cmty_candidates)
+
+    _download(graph_url, graph_gz)
+    _download(cmty_url,  cmty_gz)
 
     # ── Load edges ────────────────────────────────────────────────────────────
     print("Parsing edge list ...")
@@ -72,11 +125,37 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
     # ── Load ground-truth communities (filter to subgraph) ───────────────────
     print("Parsing community file ...")
     communities: list[frozenset] = []
-    with gzip.open(cmty_gz, "rt") as f:
-        for line in f:
-            members = frozenset(int(x) for x in line.split()) & node_set
-            if len(members) >= 3:          # skip tiny communities
-                communities.append(members)
+
+    # Read gz in binary chunks and split on newline to avoid issues with very
+    # long lines or gzip iterator edge-cases that can surface as read1 errors.
+    with gzip.open(cmty_gz, "rb") as f:
+        buf = b""
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            buf += chunk
+            while True:
+                nl = buf.find(b"\n")
+                if nl == -1:
+                    break
+                line = buf[:nl]
+                buf = buf[nl + 1 :]
+                if not line:
+                    continue
+                try:
+                    members = frozenset(int(x) for x in line.split()) & node_set
+                except Exception:
+                    # Skip malformed lines silently
+                    continue
+                if len(members) >= 3:
+                    communities.append(members)
+
+        # leftover
+        if buf:
+            try:
+                members = frozenset(int(x) for x in buf.split()) & node_set
+                if len(members) >= 3:
+                    communities.append(members)
+            except Exception:
+                pass
 
     overlapping = sum(1 for v in node_set
                       if sum(v in c for c in communities) > 1)

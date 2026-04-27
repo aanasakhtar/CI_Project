@@ -2,6 +2,7 @@
 config.py — Central configuration for all experiments.
 Edit these values before running any module.
 """
+import os
 
 # ── HP-MOCD baseline hyperparameters (from paper, Table 1) ──────────────────
 HPMOCD_CONFIG = {
@@ -12,6 +13,15 @@ HPMOCD_CONFIG = {
     "ensemble_size":      4,     # parents per crossover
     "n_threads":          8,     # set to your core count
 }
+
+# Development override: set the environment variable `CI_DEV=1` to
+# automatically reduce expensive hyperparameters for quick local tests.
+if os.environ.get("CI_DEV"):
+    HPMOCD_CONFIG.update({
+        "population_size": 10,
+        "max_generations": 5,
+        "n_threads": 1,
+    })
 
 # ── LFR Benchmark parameters ─────────────────────────────────────────────────
 LFR_CONFIG = {
@@ -32,8 +42,8 @@ LFR_CONFIG = {
 # ── DBLP dataset ─────────────────────────────────────────────────────────────
 DBLP_CONFIG = {
     # SNAP DBLP ground-truth communities
-    "url_graph":      "https://snap.stanford.edu/data/com-DBLP.ungraph.txt.gz",
-    "url_cmty":       "https://snap.stanford.edu/data/com-DBLP.all.cmty.txt.gz",
+    "url_graph":      "https://snap.stanford.edu/data/bigdata/communities/com-dblp.ungraph.txt.gz",
+    "url_cmty":       "https://snap.stanford.edu/data/bigdata/communities/com-dblp.all.cmty.txt.gz",
     "save_dir":       "data/dblp_raw/",
     # Subsample for faster iteration during development
     "subsample_nodes": 10_000,   # set to None to use full graph (~317k nodes)
