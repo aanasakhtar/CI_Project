@@ -9,9 +9,16 @@ HPMOCD_CONFIG = {
     "population_size":    100,
     "max_generations":    100,
     "crossover_prob":     0.8,
-    "mutation_prob":      0.2,
+    "mutation_prob":      0.25,
     "ensemble_size":      4,     # parents per crossover
     "n_threads":          8,     # set to your core count
+    "seed":               42,
+    # Disjoint baseline tuning
+    "novel_label_prob":   0.03,
+    # Overlap extension tuning
+    "overlap_add_second_prob":      0.22,
+    "overlap_second_support_ratio": 0.70,
+    "overlap_support_margin":       3,
 }
 
 # Development override: set the environment variable `CI_DEV=1` to

@@ -36,6 +36,24 @@ def _partition_to_label_array(
     return label
 
 
+def _cover_to_hard_partition(communities: list[frozenset]) -> list[frozenset]:
+    """Project an overlapping cover to a hard partition deterministically.
+
+    This is used only for approximate metrics like modularity, which require
+    a true partition. The first community that claims a node wins.
+    """
+    node_to_cid: dict[int, int] = {}
+    for cid, comm in enumerate(communities):
+        for node in comm:
+            node_to_cid.setdefault(node, cid)
+
+    groups: dict[int, set] = {}
+    for node, cid in node_to_cid.items():
+        groups.setdefault(cid, set()).add(node)
+
+    return [frozenset(nodes) for _cid, nodes in sorted(groups.items(), key=lambda item: item[0])]
+
+
 # ── Disjoint metrics ─────────────────────────────────────────────────────────
 
 def nmi(pred: list[frozenset], true: list[frozenset]) -> float:
@@ -178,10 +196,11 @@ def evaluate_overlapping(
     pred: list[frozenset],
     true: list[frozenset],
 ) -> dict[str, float]:
+    pred_hard = _cover_to_hard_partition(pred)
     return {
         "NMI":        nmi(pred, true),        # approximate for overlapping
         "AMI":        ami(pred, true),
-        "Modularity": modularity(G, pred),
+        "Modularity": modularity(G, pred_hard),
         "F1":         pairwise_f1(pred, true),
         "Omega":      omega_index(pred, true), # primary overlapping metric
     }

@@ -25,7 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import networkx as nx
 
-from HPMOCD.hp_mocd_baseline       import run_hp_mocd, HAS_HPMOCD
+from HPMOCD.hp_mocd_baseline       import run_minimal_nsgaii
 from HPMOCD.hp_mocd_overlapping    import run_hp_mocd_overlapping
 from evaluation.metrics              import evaluate_disjoint, evaluate_overlapping
 from evaluation.partition_utils      import save_partition_report
@@ -62,80 +62,76 @@ def _print_membership_preview(
     )
 
 
-def _run_both_methods(
-    G: nx.Graph,
-    ground_truth: list,
-    dataset_name: str,
-    is_overlapping_gt: bool,
+def _run_disjoint_lfr(
     output_dir: Path,
     preview_memberships: int,
-    overlapping_n_communities: int | None,
-) -> None:
-    """
-    Run baseline + overlapping on one graph and print comparison.
+) -> list[frozenset]:
+    """Run the stronger local NSGA-II baseline on the disjoint LFR benchmark."""
+    print("\nLoading disjoint LFR benchmark ...")
+    from data.load_lfr import load_lfr_disjoint
 
-    Parameters
-    ----------
-    G                  : the graph
-    ground_truth       : list[frozenset] ground-truth communities
-    dataset_name       : string label for printing
-    is_overlapping_gt  : True if ground truth has overlapping communities
-                         (uses evaluate_overlapping which includes Omega)
-    """
+    G, ground_truth = load_lfr_disjoint()
     print(f"\n{'='*65}")
-    print(f"  DATASET: {dataset_name}")
+    print("  DATASET: LFR Disjoint Benchmark")
     print(f"  Nodes={G.number_of_nodes()}  Edges={G.number_of_edges()}")
     print(f"  Ground-truth communities: {len(ground_truth)}")
     print(f"{'='*65}")
 
-    if not HAS_HPMOCD:
-        fallback_init = max(2, int(len(G) ** 0.5 // 3))
-        print("  [DIAG] Baseline is using MinimalNSGAII fallback "
-              "because pymocd is not installed.")
-        print("  [DIAG] Fallback initial labels="
-              f"{fallback_init}; this acts as an upper bound because "
-              "fallback operators do not create new labels.")
+    print("\n>> Running stronger MinimalNSGAII baseline ...")
+    baseline_partition, baseline_rt = run_minimal_nsgaii(G)
+    print(f"   Detected {len(baseline_partition)} communities in {baseline_rt:.2f}s")
+
+    baseline_scores = evaluate_disjoint(G, baseline_partition, ground_truth)
+    _print_scores("Disjoint baseline", baseline_scores)
+
+    baseline_output = output_dir / "lfr_disjoint_baseline_memberships.json"
+    baseline_node_map = save_partition_report(
+        baseline_output,
+        "LFR Disjoint Benchmark",
+        "minimal_nsgaii",
+        baseline_partition,
+    )
+    _print_membership_preview("Disjoint baseline", baseline_node_map, preview_memberships)
+    print(f"   Saved baseline memberships: {baseline_output}")
+    return baseline_partition
+
+
+def _run_overlap_lfr(
+    output_dir: Path,
+    preview_memberships: int,
+    overlapping_n_communities: int | None,
+    seed_partition: list[frozenset] | None = None,
+) -> None:
+    """Run the overlapping extension on the overlapping LFR benchmark."""
+    print("\nLoading overlapping LFR benchmark ...")
+    from data.load_lfr import load_lfr_overlapping
+
+    G, ground_truth = load_lfr_overlapping()
+    print(f"\n{'='*65}")
+    print("  DATASET: LFR Overlapping Benchmark")
+    print(f"  Nodes={G.number_of_nodes()}  Edges={G.number_of_edges()}")
+    print(f"  Ground-truth communities: {len(ground_truth)}")
+    print(f"{'='*65}")
 
     overlap_init = (
         max(2, overlapping_n_communities)
         if overlapping_n_communities is not None
         else max(2, int(len(G) ** 0.5 // 2))
     )
-    print("  [DIAG] Overlapping initial labels="
-            f"{overlap_init}; this is an initial label pool (not a hard cap), "
-            "but very small values can still bias toward fewer communities.")
-
-    evaluate_fn = evaluate_overlapping if is_overlapping_gt else evaluate_disjoint
-    dataset_slug = _slugify(dataset_name)
-
-    # ── 1. Baseline HP-MOCD ───────────────────────────────────────────────────
-    print("\n>> Running baseline HP-MOCD ...")
-    baseline_partition, _, baseline_rt = run_hp_mocd(G)
-    print(f"   Detected {len(baseline_partition)} communities in {baseline_rt:.2f}s")
-
-    baseline_scores = evaluate_fn(G, baseline_partition, ground_truth)
-    _print_scores("Baseline", baseline_scores)
-
-    baseline_output = output_dir / f"{dataset_slug}_baseline_memberships.json"
-    baseline_node_map = save_partition_report(
-        baseline_output,
-        dataset_name,
-        "baseline",
-        baseline_partition,
+    print(
+        "  [DIAG] Overlapping initial labels="
+        f"{overlap_init}; this is an initial label pool (not a hard cap)."
     )
-    _print_membership_preview("Baseline", baseline_node_map, preview_memberships)
-    print(f"   Saved baseline memberships: {baseline_output}")
 
-    # ── 2. Overlapping extension ──────────────────────────────────────────────
-    print("\n>> Running overlapping HP-MOCD extension ...")
+    print("\n>> Running overlapping HP-MOCD-like extension ...")
     overlapping_partition, overlapping_rt = run_hp_mocd_overlapping(
         G,
         max_memberships=2,
         n_communities=overlapping_n_communities,
+        seed_partition=seed_partition,
     )
     print(f"   Detected {len(overlapping_partition)} communities in {overlapping_rt:.2f}s")
 
-    # Count how many nodes actually overlap
     node_counts: dict[int, int] = {}
     for community in overlapping_partition:
         for node in community:
@@ -143,31 +139,18 @@ def _run_both_methods(
     n_overlapping = sum(1 for c in node_counts.values() if c > 1)
     print(f"   Overlapping nodes: {n_overlapping} / {G.number_of_nodes()}")
 
-    overlapping_scores = evaluate_fn(G, overlapping_partition, ground_truth)
-    _print_scores("Overlapping", overlapping_scores)
+    overlapping_scores = evaluate_overlapping(G, overlapping_partition, ground_truth)
+    _print_scores("Overlapping extension", overlapping_scores)
 
-    overlapping_output = output_dir / f"{dataset_slug}_overlapping_memberships.json"
+    overlapping_output = output_dir / "lfr_overlapping_extension_memberships.json"
     overlapping_node_map = save_partition_report(
         overlapping_output,
-        dataset_name,
-        "overlapping",
+        "LFR Overlapping Benchmark",
+        "overlapping_extension",
         overlapping_partition,
     )
-    _print_membership_preview("Overlapping", overlapping_node_map, preview_memberships)
+    _print_membership_preview("Overlapping extension", overlapping_node_map, preview_memberships)
     print(f"   Saved overlapping memberships: {overlapping_output}")
-
-    # ── Summary comparison ────────────────────────────────────────────────────
-    print(f"\n{'-'*65}")
-    print(f"  {'Metric':<15} {'Baseline':>12} {'Overlapping':>14} {'Better':>10}")
-    print(f"{'-'*65}")
-    for metric in baseline_scores:
-        b = baseline_scores[metric]
-        o = overlapping_scores[metric]
-        better = "Baseline" if b >= o else "Overlapping"
-        print(f"  {metric:<15} {b:>12.4f} {o:>14.4f} {better:>10}")
-    print(f"{'-'*65}")
-    print(f"  {'Runtime':<15} {baseline_rt:>11.2f}s {overlapping_rt:>13.2f}s")
-    print(f"{'-'*65}\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -179,38 +162,9 @@ def run_lfr(
     preview_memberships: int,
     overlapping_n_communities: int | None,
 ) -> None:
-    """Run both methods on the LFR overlapping benchmark."""
-    print("\nLoading LFR benchmark ...")
-    try:
-        from data.load_lfr import load_lfr_overlapping
-        G, ground_truth = load_lfr_overlapping()
-    except TypeError as e:
-        # Older NetworkX versions don't support the 'on'/'om' overlap params.
-        # Fall back to the disjoint LFR variant.
-        print(f"  [WARNING] Overlapping LFR failed ({e})")
-        print("  Falling back to disjoint LFR ...")
-        from data.load_lfr import load_lfr_disjoint
-        G, ground_truth = load_lfr_disjoint()
-        _run_both_methods(
-            G,
-            ground_truth,
-            "LFR (disjoint fallback)",
-            is_overlapping_gt=False,
-            output_dir=output_dir,
-            preview_memberships=preview_memberships,
-            overlapping_n_communities=overlapping_n_communities,
-        )
-        return
-
-    _run_both_methods(
-        G,
-        ground_truth,
-        "LFR Overlapping Benchmark",
-        is_overlapping_gt=True,
-        output_dir=output_dir,
-        preview_memberships=preview_memberships,
-        overlapping_n_communities=overlapping_n_communities,
-    )
+    """Run the disjoint phase first, then the overlapping phase."""
+    seed_partition = _run_disjoint_lfr(output_dir, preview_memberships)
+    _run_overlap_lfr(output_dir, preview_memberships, overlapping_n_communities, seed_partition)
 
 
 def run_dblp(
@@ -218,19 +172,37 @@ def run_dblp(
     preview_memberships: int,
     overlapping_n_communities: int | None,
 ) -> None:
-    """Run both methods on the DBLP co-authorship network."""
+    """Run the overlapping extension on the DBLP co-authorship network."""
     print("\nLoading DBLP ...")
     from data.load_dblp import load_dblp
     G, ground_truth = load_dblp()
-    _run_both_methods(
+
+    print(f"\n{'='*65}")
+    print("  DATASET: DBLP Co-authorship")
+    print(f"  Nodes={G.number_of_nodes()}  Edges={G.number_of_edges()}")
+    print(f"  Ground-truth communities: {len(ground_truth)}")
+    print(f"{'='*65}")
+
+    print("\n>> Running overlapping HP-MOCD-like extension ...")
+    overlapping_partition, overlapping_rt = run_hp_mocd_overlapping(
         G,
-        ground_truth,
-        "DBLP Co-authorship",
-        is_overlapping_gt=True,
-        output_dir=output_dir,
-        preview_memberships=preview_memberships,
-        overlapping_n_communities=overlapping_n_communities,
+        max_memberships=2,
+        n_communities=overlapping_n_communities,
     )
+    print(f"   Detected {len(overlapping_partition)} communities in {overlapping_rt:.2f}s")
+
+    overlapping_scores = evaluate_overlapping(G, overlapping_partition, ground_truth)
+    _print_scores("DBLP overlapping extension", overlapping_scores)
+
+    overlapping_output = output_dir / "dblp_overlapping_extension_memberships.json"
+    overlapping_node_map = save_partition_report(
+        overlapping_output,
+        "DBLP Co-authorship",
+        "overlapping_extension",
+        overlapping_partition,
+    )
+    _print_membership_preview("DBLP overlapping extension", overlapping_node_map, preview_memberships)
+    print(f"   Saved overlapping memberships: {overlapping_output}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -269,12 +241,12 @@ if __name__ == "__main__":
 
     output_dir = Path(args.output_dir)
 
-    # if args.dataset in ("lfr", "both"):
-    #     run_lfr(
-    #         output_dir=output_dir,
-    #         preview_memberships=args.preview_memberships,
-    #         overlapping_n_communities=args.n_communities,
-    #     )
+    if args.dataset in ("lfr", "both"):
+        run_lfr(
+            output_dir=output_dir,
+            preview_memberships=args.preview_memberships,
+            overlapping_n_communities=args.n_communities,
+        )
 
     if args.dataset in ("dblp", "both"):
         run_dblp(
