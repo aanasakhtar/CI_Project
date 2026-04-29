@@ -1,15 +1,62 @@
 """
-hp_mocd_overlapping.py
-══════════════════════
-Overlapping community detection with a true multi-objective NSGA-II design.
+hp_mocd_overlapping.py  (v3 — overlap-aware)
+══════════════════════════════════════════════
+Overlapping community detection as a multi-objective NSGA-II extension of
+HP-MOCD.
 
-This implementation is intentionally pure Python so it can be evolved by teams
-without Rust dependencies. It optimizes three explicit objectives:
-  1) Modularity quality (maximize Q)
-  2) Overlap quality      (maximize edge/membership consistency)
-  3) Membership sparsity  (minimize extra memberships)
+ROOT CAUSE OF v2 FAILURE (0 overlapping nodes)
+───────────────────────────────────────────────
+v2 removed f_gap entirely, eliminating ALL pressure toward overlap.
+Pure structural objectives (modularity, conductance) are perfectly satisfied
+by a clean disjoint partition — so the algorithm trivially converged to one.
+The add_secondary mutation existed but was too strict (k_min + ratio threshold
+meant it almost never fired in practice), and 25 % of mutations were remove_
+secondary, actively pruning any overlap that appeared.
 
-All objectives are handled directly by NSGA-II (no hard reward/penalty logic).
+THREE-OBJECTIVE DESIGN (v3)
+───────────────────────────
+f1: 1 − modularity          — structure quality (hard projection)
+f2: mean conductance        — community tightness (hard projection)
+f3: overlap quality loss    — NEW: rewards well-supported overlap,
+                              penalises zero-overlap AND unsupported overlap.
+                              Range [0,1].  A perfect disjoint solution scores
+                              f3 = 1.0 (no overlap at all = maximum loss).
+                              A solution with ~20 % well-supported overlap
+                              scores f3 ≈ 0.0.
+
+f3 DESIGN IN DETAIL
+───────────────────
+f3 has two additive components:
+
+  (a) no_overlap_penalty:
+        = max(0,  target_rate − actual_rate) / target_rate
+        Penalises having FEWER overlapping nodes than the soft target.
+        Goes to 0 once actual_rate >= target_rate.
+        This is a SOFT floor, not a hard constraint.
+
+  (b) unsupported_overlap_penalty:
+        For each overlapping node, ratio = min_support / max_support.
+        Penalises memberships where ratio < threshold (random overlap).
+        Goes to 0 for a well-supported overlap node.
+
+  f3 = 0.5 * no_overlap_penalty + 0.5 * unsupported_penalty
+
+This creates the right gradient:
+  - Disjoint → f3 = 0.5 (from no_overlap alone) → pressure to add overlap
+  - Random overlap → f3 high (both terms active) → pressure to fix placement
+  - Good overlap → f3 ≈ 0 → no pressure, keeps what it has
+
+OPERATOR FIX
+────────────
+  add_secondary probability raised to 40 % (was 30 %).
+  Thresholds relaxed: k_min=1, support_ratio=0.20 (was k_min=2, ratio=0.30).
+  remove_secondary reduced to 15 % (was 25 %) — stops pruning what f3 builds.
+
+INTERFACE (unchanged — drop-in replacement)
+───────────────────────────────────────────
+    from HPMOCD.hp_mocd_overlapping import run_hp_mocd_overlapping
+
+    partition, runtime = run_hp_mocd_overlapping(G, max_memberships=2)
 """
 
 from __future__ import annotations
@@ -17,7 +64,7 @@ from __future__ import annotations
 import random
 import sys
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 import networkx as nx
@@ -30,7 +77,9 @@ from config import HPMOCD_CONFIG
 from HPMOCD.hp_mocd_baseline import run_minimal_nsgaii
 
 
-# ── Representation helpers ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 1 — REPRESENTATION HELPERS  (unchanged from v1)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _resolve_n_communities(G: nx.Graph, cfg: dict, n_communities: int | None) -> int:
     if n_communities is None:
@@ -68,23 +117,15 @@ def _hard_partition_from_overlapping(
     partition: dict[int, set[int]],
     neighbors_cache: dict[int, list[int]],
 ) -> list[frozenset]:
-    """Project overlapping partition to a disjoint partition for modularity.
-
-    Node keeps the label with highest neighbor support.
-    """
+    """Project overlapping partition → disjoint (node keeps best-supported label)."""
     disjoint: dict[int, int] = {}
     for node, labels in partition.items():
         if len(labels) == 1:
             disjoint[node] = next(iter(labels))
             continue
-
         support = {}
         for label in labels:
-            s = 0
-            for nbr in neighbors_cache[node]:
-                if label in partition[nbr]:
-                    s += 1
-            support[label] = s
+            support[label] = sum(1 for nbr in neighbors_cache[node] if label in partition[nbr])
         disjoint[node] = max(labels, key=lambda label: (support[label], -label))
 
     grouped: dict[int, set[int]] = {}
@@ -93,209 +134,247 @@ def _hard_partition_from_overlapping(
     return [frozenset(nodes) for _cid, nodes in sorted(grouped.items())]
 
 
-# ── Objectives ───────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 2 — OBJECTIVES  (redesigned)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _modularity_objective(
     G: nx.Graph,
     partition: dict[int, set[int]],
     neighbors_cache: dict[int, list[int]],
 ) -> float:
-    hard_partition = _hard_partition_from_overlapping(partition, neighbors_cache)
-    q = nx.community.modularity(G, hard_partition)
+    """f1 = 1 − Q  (minimise).  Uses hard projection, same as v1."""
+    hard = _hard_partition_from_overlapping(partition, neighbors_cache)
+    try:
+        q = nx.community.modularity(G, hard)
+    except Exception:
+        q = -1.0
     return 1.0 - float(q)
 
 
-def _edge_membership_agreement(G: nx.Graph, partition: dict[int, set[int]]) -> float:
-    m = G.number_of_edges()
-    if m == 0:
-        return 0.0
-
-    total = 0.0
-    for u, v in G.edges():
-        lu = partition[u]
-        lv = partition[v]
-        inter = len(lu & lv)
-        union = len(lu | lv)
-        total += (inter / union) if union > 0 else 0.0
-    return total / m
-
-
-def _overlap_support_quality(
+def _conductance_objective(
+    G: nx.Graph,
     partition: dict[int, set[int]],
     neighbors_cache: dict[int, list[int]],
 ) -> float:
-    """Quality of overlap memberships based on local neighborhood support."""
-    qualities: list[float] = []
+    """
+    f2 = mean conductance over all communities  (minimise → tight communities).
 
+    Conductance of community C:
+        φ(C) = cut(C) / min(vol(C), vol(V-C))
+
+    where cut = edges crossing boundary, vol = sum of degrees inside C.
+
+    Range: [0, 1].  0 = perfectly isolated community, 1 = all edges cross.
+
+    Why this is better than the old edge-agreement proxy
+    ─────────────────────────────────────────────────────
+    Edge-agreement counts intra-community edge fraction, which correlates
+    strongly with community SIZE — large communities always look better.
+    Conductance normalises by volume so small tight communities are not
+    penalised, making it a fairer, more discriminating quality signal.
+    """
+    hard = _hard_partition_from_overlapping(partition, neighbors_cache)
+    if not hard:
+        return 1.0
+
+    total_vol = 2 * G.number_of_edges()
+    if total_vol == 0:
+        return 1.0
+
+    conductances: list[float] = []
+    for comm in hard:
+        vol_in = sum(G.degree(v) for v in comm)
+        cut = sum(
+            1 for v in comm for nbr in G.neighbors(v) if nbr not in comm
+        )
+        denominator = min(vol_in, total_vol - vol_in)
+        if denominator <= 0:
+            conductances.append(0.0)
+        else:
+            conductances.append(cut / denominator)
+
+    return sum(conductances) / max(1, len(conductances))
+
+
+def _overlap_quality_objective(
+    partition: dict[int, set[int]],
+    neighbors_cache: dict[int, list[int]],
+    target_overlap_rate: float = 0.20,
+    support_threshold: float = 0.20,
+) -> float:
+    """
+    f3 = overlap quality loss  (minimise).
+
+    Composed of two terms that TOGETHER create the right gradient:
+
+    (a) no_overlap_penalty  [0, 1]
+        = max(0,  target_rate − actual_rate) / target_rate
+        A disjoint solution (0 overlap) gets full penalty = 1.0 here.
+        Once actual_rate >= target_rate this term goes to 0.
+        This is a SOFT floor — not a hard count constraint like old f_gap.
+
+    (b) unsupported_overlap_penalty  [0, 1]
+        For each overlapping node: ratio = min_support / max_support.
+        Penalises memberships where ratio < support_threshold.
+        A node with 5 neighbours in comm A and 4 in comm B → ratio=0.8 → no penalty.
+        A node with 5 neighbours in comm A and 0 in comm B → ratio=0.0 → penalised.
+
+    f3 = 0.5 * no_overlap_penalty + 0.5 * unsupported_overlap_penalty
+
+    Why this works where v2 failed
+    ───────────────────────────────
+    v2's f3 only penalised BAD overlap; a disjoint partition had f3=0 (no
+    overlap, no penalty → no pressure to add overlap).  This f3 explicitly
+    penalises TOO LITTLE overlap via term (a), so disjoint solutions are no
+    longer free riders.  Term (b) then guides WHERE overlap is placed.
+    """
+    n = max(1, len(partition))
+    overlap_nodes = sum(1 for labels in partition.values() if len(labels) > 1)
+    actual_rate = overlap_nodes / n
+
+    # (a) Penalise too little overlap (soft floor).
+    if target_overlap_rate > 0:
+        no_overlap_penalty = max(0.0, (target_overlap_rate - actual_rate) / target_overlap_rate)
+    else:
+        no_overlap_penalty = 0.0
+
+    # (b) Penalise unsupported overlap nodes.
+    unsupported_penalties: list[float] = []
     for node, labels in partition.items():
         if len(labels) <= 1:
             continue
-
         nbrs = neighbors_cache[node]
         if not nbrs:
+            unsupported_penalties.append(1.0)
             continue
 
-        label_scores = []
-        for label in labels:
-            support = sum(1 for nbr in nbrs if label in partition[nbr])
-            label_scores.append(support / len(nbrs))
+        label_support = {
+            label: sum(1 for nbr in nbrs if label in partition[nbr])
+            for label in labels
+        }
+        max_sup = max(label_support.values())
+        min_sup = min(label_support.values())
 
-        if label_scores:
-            qualities.append(sum(label_scores) / len(label_scores))
+        if max_sup == 0:
+            unsupported_penalties.append(1.0)
+            continue
 
-    if not qualities:
-        return 0.0
-    return sum(qualities) / len(qualities)
+        ratio = min_sup / max_sup
+        if ratio < support_threshold:
+            unsupported_penalties.append(support_threshold - ratio)
 
+    if unsupported_penalties:
+        unsupported_penalty = min(1.0, sum(unsupported_penalties) / n)
+    else:
+        unsupported_penalty = 0.0
 
-def _sparsity_objective(partition: dict[int, set[int]]) -> float:
-    n = max(1, len(partition))
-    extra = sum(max(0, len(labels) - 1) for labels in partition.values())
-    return extra / n
-
-
-def _overlap_target_gap(partition: dict[int, set[int]], target_overlap_rate: float) -> float:
-    n = max(1, len(partition))
-    overlap_nodes = sum(1 for labels in partition.values() if len(labels) > 1)
-    overlap_rate = overlap_nodes / n
-    return abs(overlap_rate - target_overlap_rate)
+    return 0.5 * no_overlap_penalty + 0.5 * unsupported_penalty
 
 
 def _evaluate_objectives(
     G: nx.Graph,
     partition: dict[int, set[int]],
     neighbors_cache: dict[int, list[int]],
-    target_overlap_rate: float,
-    target_n_communities: int,
-) -> tuple[float, float, float, float]:
-    """Return minimization objectives:
-
-    (f_modularity, f_overlap_quality, f_sparsity, f_target_overlap_gap)
+    target_overlap_rate: float = 0.20,
+) -> tuple[float, float, float]:
     """
-    f_mod = _modularity_objective(G, partition, neighbors_cache)
+    Return (f1, f2, f3) — all minimised.
 
-    num_comms = len(_partition_to_frozensets(partition))
-    target = target_n_communities
-    comm_penalty = abs(num_comms - target) / target
-
-    edge_agree = _edge_membership_agreement(G, partition)
-    support_quality = _overlap_support_quality(partition, neighbors_cache)
-    target_gap = _overlap_target_gap(partition, target_overlap_rate)
-
-    # Rebalanced overlap (less dominant)
-    overlap_quality = 0.6 * edge_agree + 0.4 * support_quality
-    f_overlap = 1.0 - overlap_quality
-
-    f_sparse = _sparsity_objective(partition)
-    return (f_mod, f_overlap, f_sparse, target_gap)
+    f1: 1 − modularity       (structure quality via hard projection)
+    f2: mean conductance      (community tightness via hard projection)
+    f3: overlap quality loss  (soft overlap floor + unsupported-overlap penalty)
+    """
+    f1 = _modularity_objective(G, partition, neighbors_cache)
+    f2 = _conductance_objective(G, partition, neighbors_cache)
+    f3 = _overlap_quality_objective(
+        partition, neighbors_cache,
+        target_overlap_rate=target_overlap_rate,
+    )
+    return (f1, f2, f3)
 
 
-# ── Operators ────────────────────────────────────────────────────────────────
-
-def _topology_aware_crossover(
-    parent1: dict[int, set[int]],
-    parent2: dict[int, set[int]],
-    neighbors_cache: dict[int, list[int]],
-    max_memberships: int,
-    add_second_prob: float,
-    second_support_ratio: float,
-) -> dict[int, set[int]]:
-    child: dict[int, set[int]] = {}
-
-    for node, nbrs in neighbors_cache.items():
-        candidates = parent1[node] | parent2[node]
-        if not candidates:
-            child[node] = set(parent1[node])
-            continue
-
-        support: dict[int, int] = {label: 0 for label in candidates}
-        for nbr in nbrs:
-            for label in candidates:
-                if label in parent1[nbr] or label in parent2[nbr]:
-                    support[label] += 1
-
-        ranked = sorted(candidates, key=lambda label: (support[label], random.random()), reverse=True)
-        selected = {ranked[0]}
-
-        if max_memberships > 1 and len(ranked) > 1:
-            p = ranked[0]
-            s = ranked[1]
-            if support[s] >= 2 and support[s] >= second_support_ratio * max(1, support[p]):
-                if random.random() < add_second_prob:
-                    selected.add(s)
-
-        child[node] = selected
-
-    return child
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 3 — OPERATORS  (rebalanced + guided add)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _op_boundary_reassign(
     partition: dict[int, set[int]],
     node: int,
     neighbors_cache: dict[int, list[int]],
 ) -> None:
+    """Assign node to majority-vote community among its neighbours (disjoint)."""
     nbrs = neighbors_cache[node]
     if not nbrs:
         return
-
-    counts = Counter()
+    counts: Counter = Counter()
     for nbr in nbrs:
         counts.update(partition[nbr])
-    if not counts:
-        return
-
-    best = counts.most_common(1)[0][0]
-    partition[node] = {best}
+    if counts:
+        best = counts.most_common(1)[0][0]
+        partition[node] = {best}
 
 
-def _op_add_secondary(
+def _op_guided_add_secondary(
     partition: dict[int, set[int]],
     node: int,
     neighbors_cache: dict[int, list[int]],
     max_memberships: int,
-    support_margin: int,
-    target_overlap_rate: float,
+    k_min: int = 1,
+    support_ratio_threshold: float = 0.20,
 ) -> None:
-    if len(partition[node]) >= max_memberships:
-        return
+    """
+    Add a secondary community membership where structurally supported.
 
-    current_overlap = sum(1 for labels in partition.values() if len(labels) > 1) / max(1, len(partition))
-    if current_overlap > target_overlap_rate * 1.5:
+    Thresholds (v3, relaxed from v2):
+      k_min = 1           — only 1 neighbour needed in the second community
+                            (v2 used 2, which was too strict for sparse nodes)
+      support_ratio = 0.20 — secondary support must be ≥ 20 % of primary
+                            (v2 used 0.30 — rarely triggered)
+
+    The f3 objective then EVALUATES whether the added membership is truly
+    supported (ratio ≥ 0.20) or weak (penalised).  The operator's job is
+    to PROPOSE; the objective's job is to FILTER via selection pressure.
+    """
+    if len(partition[node]) >= max_memberships:
         return
 
     nbrs = neighbors_cache[node]
     if not nbrs:
         return
 
-    counts = Counter()
+    counts: Counter = Counter()
     for nbr in nbrs:
         counts.update(partition[nbr])
-    if not counts:
-        return
 
     current = partition[node]
-    current_support = max((counts.get(label, 0) for label in current), default=0)
-    for label, c in counts.most_common():
-        if label not in current and c >= current_support + support_margin:
+    primary_support = max((counts.get(label, 0) for label in current), default=0)
+
+    for label, count in counts.most_common():
+        if label in current:
+            continue
+        if count >= k_min and count >= support_ratio_threshold * max(1, primary_support):
             partition[node] = set(current) | {label}
             return
 
 
-def _op_remove_secondary(
+def _op_remove_weak_secondary(
     partition: dict[int, set[int]],
     node: int,
     neighbors_cache: dict[int, list[int]],
 ) -> None:
+    """Remove the least-supported secondary membership."""
     labels = partition[node]
     if len(labels) <= 1:
         return
 
     nbrs = neighbors_cache[node]
     if not nbrs:
-        partition[node] = {next(iter(labels))}
+        # No neighbours — keep only the smallest label (deterministic).
+        partition[node] = {min(labels)}
         return
 
-    counts = Counter()
+    counts: Counter = Counter()
     for nbr in nbrs:
         counts.update(partition[nbr])
 
@@ -306,26 +385,38 @@ def _op_remove_secondary(
         partition[node] = updated
 
 
-def _op_split_community(partition: dict[int, set[int]], max_label_id: int) -> None:
+def _op_split_community(partition: dict[int, set[int]], max_label_id: int) -> int:
+    """
+    Split the largest community by peeling off a small fraction.
+
+    Returns the new max_label_id.
+    """
     memberships: dict[int, list[int]] = {}
     for node, labels in partition.items():
         for label in labels:
             memberships.setdefault(label, []).append(node)
     if not memberships:
-        return
+        return max_label_id
 
     largest_label, members = max(memberships.items(), key=lambda item: len(item[1]))
     if len(members) < 8:
-        return
+        return max_label_id
 
     new_label = max_label_id + 1
-    subset = members[: max(2, len(members) // 4)]
+    # Peel off ≤ 20 % of the community (reduced from v1's 25 %).
+    subset = members[: max(2, len(members) // 5)]
     for node in subset:
         partition[node].discard(largest_label)
         partition[node].add(new_label)
+    return new_label
 
 
 def _op_merge_communities(partition: dict[int, set[int]]) -> None:
+    """
+    Merge two communities only when they overlap significantly (Jaccard ≥ 0.25).
+
+    Same guard as v1 — reduced application probability handles the rest.
+    """
     memberships: dict[int, set[int]] = {}
     for node, labels in partition.items():
         for label in labels:
@@ -353,39 +444,121 @@ def _mutate(
     neighbors_cache: dict[int, list[int]],
     mutation_prob: float,
     max_memberships: int,
-    support_margin: int,
-    target_overlap_rate: float,
     max_label_id: int,
-) -> dict[int, set[int]]:
+    k_min: int = 1,
+    support_ratio_threshold: float = 0.20,
+) -> tuple[dict[int, set[int]], int]:
+    """
+    Apply one mutation operator to a copy of `partition`.
+
+    Operator probabilities (v3):
+        boundary_reassign    : 38 %   — good structural move, keep dominant
+        guided_add_secondary : 40 %   — raised from 30 %; primary driver of overlap
+        remove_weak_secondary: 15 %   — reduced from 25 %; was pruning too much
+        split_community      :  5 %   — kept small
+        merge_communities    :  2 %   — minimal; too destructive
+
+    The key change from v2: add (40 %) >> remove (15 %).  In v2 they were
+    balanced (30/25), which meant the algorithm added and removed overlap at
+    nearly the same rate, producing no net drift toward overlap.
+
+    Returns
+    -------
+    mutated partition, (possibly updated) max_label_id
+    """
     child = {node: set(labels) for node, labels in partition.items()}
     if random.random() >= mutation_prob:
-        return child
+        return child, max_label_id
 
     node = random.choice(list(child.keys()))
     op = random.random()
 
-    if op < 0.35:
+    if op < 0.38:
         _op_boundary_reassign(child, node, neighbors_cache)
-    elif op < 0.60:
-        _op_add_secondary(child, node, neighbors_cache, max_memberships, support_margin, target_overlap_rate)
-    elif op < 0.80:
-        _op_remove_secondary(child, node, neighbors_cache)
-    elif op < 0.90:
-        _op_split_community(child, max_label_id)
-    else:
+    elif op < 0.78:          # 0.38 + 0.40
+        _op_guided_add_secondary(
+            child, node, neighbors_cache, max_memberships,
+            k_min=k_min, support_ratio_threshold=support_ratio_threshold,
+        )
+    elif op < 0.93:          # + 0.15
+        _op_remove_weak_secondary(child, node, neighbors_cache)
+    elif op < 0.98:          # + 0.05
+        max_label_id = _op_split_community(child, max_label_id)
+    else:                    # + 0.02
         _op_merge_communities(child)
 
-    # safety: no node should become unlabeled
+    # Safety: no node may become unlabelled.
     for n, labels in child.items():
         if not labels:
-            child[n] = {partition[n] and next(iter(partition[n])) or 0}
+            child[n] = set(partition[n]) or {0}
+
+    return child, max_label_id
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 4 — CROSSOVER  (identical logic to v1, kept for reference)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _topology_aware_crossover(
+    parent1: dict[int, set[int]],
+    parent2: dict[int, set[int]],
+    neighbors_cache: dict[int, list[int]],
+    max_memberships: int,
+    add_second_prob: float = 0.35,
+    second_support_ratio: float = 0.55,
+) -> dict[int, set[int]]:
+    """
+    For each node, rank candidate labels by combined neighbourhood support
+    across both parents.  Select the top label; optionally add the second
+    when its support clears both an absolute (≥ 2) and relative threshold.
+    """
+    child: dict[int, set[int]] = {}
+
+    for node, nbrs in neighbors_cache.items():
+        candidates = parent1[node] | parent2[node]
+        if not candidates:
+            child[node] = set(parent1[node])
+            continue
+
+        support: dict[int, int] = {label: 0 for label in candidates}
+        for nbr in nbrs:
+            for label in candidates:
+                if label in parent1[nbr] or label in parent2[nbr]:
+                    support[label] += 1
+
+        ranked = sorted(candidates, key=lambda label: (support[label], random.random()), reverse=True)
+        selected = {ranked[0]}
+
+        if max_memberships > 1 and len(ranked) > 1:
+            p_sup = support[ranked[0]]
+            s_sup = support[ranked[1]]
+            if s_sup >= 2 and s_sup >= second_support_ratio * max(1, p_sup):
+                if random.random() < add_second_prob:
+                    selected.add(ranked[1])
+
+        child[node] = selected
 
     return child
 
 
-# ── NSGA-II core ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION 5 — NSGA-II CORE
+# ══════════════════════════════════════════════════════════════════════════════
 
 class OverlappingNSGAII:
+    """
+    NSGA-II–based overlapping community detector.
+
+    Improvements over v1
+    ────────────────────
+    • 3 objectives instead of 4 (f_gap removed)
+    • Conductance replaces edge-agreement as f2
+    • Structural overlap penalty replaces sparsity + f_gap as f3
+    • Diversified seeding (35/35/30 split)
+    • Rebalanced mutation operators
+    • Adaptive stagnation recovery
+    """
+
     def __init__(
         self,
         G: nx.Graph,
@@ -405,24 +578,43 @@ class OverlappingNSGAII:
         self.n_communities = _resolve_n_communities(G, cfg, n_communities)
         self.max_label_id = max(self.n_communities * 4, len(G) - 1)
 
-        self.target_overlap_rate = cfg.get("target_overlap_rate", cfg.get("overlap_n", 100) / max(1, len(G)))
-        self.add_second_prob = float(cfg.get("overlap_add_second_prob", 0.10))
-        self.second_support_ratio = float(cfg.get("overlap_second_support_ratio", 0.90))
-        self.support_margin = int(cfg.get("overlap_support_margin", 3))
+        # Guided-add hyper-parameters (relaxed in v3).
+        self.k_min = 1
+        self.support_ratio_threshold = 0.20
 
-        self.neighbors_cache = {int(node): list(G.neighbors(node)) for node in G.nodes()}
-        self.fitness_cache: dict[tuple, tuple[float, float, float, float]] = {}
+        # Crossover second-label parameters.
+        self.add_second_prob = float(cfg.get("overlap_add_second_prob", 0.35))
+        self.second_support_ratio = float(cfg.get("overlap_second_support_ratio", 0.55))
+
+        # Overlap target passed through to f3.
+        self.target_overlap_rate = float(
+            cfg.get("target_overlap_rate",
+                    cfg.get("overlap_n", 200) / max(1, len(G)))
+        )
+
+        # Stagnation recovery.
+        self.patience = int(cfg.get("early_stop_patience", 20))
+        self._stagnation_boost_factor = 1.5   # temporary mutation rate multiplier
+
+        self.neighbors_cache: dict[int, list[int]] = {
+            int(node): list(G.neighbors(node)) for node in G.nodes()
+        }
+        self.fitness_cache: dict[tuple, tuple[float, float, float]] = {}
         self._external_seed_partition = seed_partition
+
+    # ── Dominance / sorting ─────────────────────────────────────────────────
 
     @staticmethod
     def _dominates(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
         return all(x <= y for x, y in zip(a, b)) and any(x < y for x, y in zip(a, b))
 
-    def _fast_non_dominated_sort(self, fitnesses: list[tuple[float, ...]]) -> list[list[int]]:
+    def _fast_non_dominated_sort(
+        self, fitnesses: list[tuple[float, ...]]
+    ) -> list[list[int]]:
         n = len(fitnesses)
         dominates = [[] for _ in range(n)]
         dominated_count = [0] * n
-        fronts = [[]]
+        fronts: list[list[int]] = [[]]
 
         for p in range(n):
             for q in range(n):
@@ -435,7 +627,7 @@ class OverlappingNSGAII:
 
         i = 0
         while fronts[i]:
-            next_front = []
+            next_front: list[int] = []
             for p in fronts[i]:
                 for q in dominates[p]:
                     dominated_count[q] -= 1
@@ -443,7 +635,6 @@ class OverlappingNSGAII:
                         next_front.append(q)
             i += 1
             fronts.append(next_front)
-
         return fronts[:-1]
 
     def _crowding_distance(
@@ -453,61 +644,148 @@ class OverlappingNSGAII:
     ) -> dict[int, float]:
         if not front:
             return {}
-
         distances = {idx: 0.0 for idx in front}
         n_obj = len(fitnesses[0])
         for obj in range(n_obj):
             ordered = sorted(front, key=lambda idx: fitnesses[idx][obj])
             distances[ordered[0]] = float("inf")
             distances[ordered[-1]] = float("inf")
-
             lo = fitnesses[ordered[0]][obj]
             hi = fitnesses[ordered[-1]][obj]
             span = hi - lo
             if span == 0:
                 continue
-
             for i in range(1, len(ordered) - 1):
-                prev_val = fitnesses[ordered[i - 1]][obj]
-                next_val = fitnesses[ordered[i + 1]][obj]
-                distances[ordered[i]] += (next_val - prev_val) / span
-
+                distances[ordered[i]] += (
+                    fitnesses[ordered[i + 1]][obj] - fitnesses[ordered[i - 1]][obj]
+                ) / span
         return distances
 
-    def _evaluate(self, individual: dict[int, set[int]]) -> tuple[float, float, float, float]:
-        signature = _partition_signature(individual)
-        cached = self.fitness_cache.get(signature)
+    # ── Fitness evaluation ──────────────────────────────────────────────────
+
+    def _evaluate(self, individual: dict[int, set[int]]) -> tuple[float, float, float]:
+        sig = _partition_signature(individual)
+        cached = self.fitness_cache.get(sig)
         if cached is not None:
             return cached
-
         fit = _evaluate_objectives(
-            self.G,
-            individual,
-            self.neighbors_cache,
+            self.G, individual, self.neighbors_cache,
             target_overlap_rate=self.target_overlap_rate,
-            target_n_communities=self.n_communities,   # ✅ add this
         )
-        self.fitness_cache[signature] = fit
+        self.fitness_cache[sig] = fit
         return fit
 
-    def _seed_population(self) -> list[dict[int, set[int]]]:
-        if self._external_seed_partition is not None:
-            seed_cover = _frozensets_to_partition(self._external_seed_partition)
-        else:
-            seed_cover = _frozensets_to_partition(run_minimal_nsgaii(self.G, cfg=self.cfg)[0])
+    # ── Population initialisation (diversified seeding) ─────────────────────
 
-        population: list[dict[int, set[int]]] = [seed_cover]
+    def _guided_overlap_injection(
+        self, base: dict[int, set[int]]
+    ) -> dict[int, set[int]]:
+        """
+        Take the disjoint HP-MOCD seed and add secondary memberships only
+        at nodes with strong structural support (k_min neighbours in second
+        community, support_ratio ≥ threshold).
+        """
+        ind = {node: set(labels) for node, labels in base.items()}
+        node_list = list(ind.keys())
+        random.shuffle(node_list)
+        for node in node_list:
+            _op_guided_add_secondary(
+                ind, node, self.neighbors_cache, self.max_memberships,
+                k_min=self.k_min,
+                support_ratio_threshold=self.support_ratio_threshold,
+            )
+        return ind
+
+    def _lpa_seed(self, resolution_jitter: float = 0.0) -> dict[int, set[int]]:
+        """LPA seed with optional label jitter for diversity."""
+        try:
+            communities = list(nx.community.asyn_lpa_communities(
+                self.G, seed=random.randint(0, 9999)
+            ))
+        except Exception:
+            communities = [set(c) for c in nx.connected_components(self.G)]
+        ind: dict[int, set[int]] = {}
+        for cid, comm in enumerate(communities):
+            for node in comm:
+                ind[int(node)] = {cid}
+        # Fill any missing nodes.
+        for node in self.G.nodes():
+            ind.setdefault(int(node), {random.randint(0, self.n_communities - 1)})
+        if resolution_jitter > 0:
+            n_jitter = max(1, int(len(ind) * resolution_jitter))
+            for node in random.sample(list(ind.keys()), n_jitter):
+                ind[node] = {random.randint(0, self.n_communities - 1)}
+        return ind
+
+    def _seed_population(self) -> list[dict[int, set[int]]]:
+        # --- Obtain the base disjoint HP-MOCD seed. ---
+        if self._external_seed_partition is not None:
+            seed_disjoint = _frozensets_to_partition(self._external_seed_partition)
+        else:
+            seed_disjoint = _frozensets_to_partition(
+                run_minimal_nsgaii(self.G, cfg=self.cfg)[0]
+            )
+
+        population: list[dict[int, set[int]]] = []
+
+        # 35 % — exact HP-MOCD seed (disjoint).
+        n_exact = max(1, int(0.35 * self.pop_size))
+        population.append(seed_disjoint)
+        while len(population) < n_exact:
+            ind = {node: set(labels) for node, labels in seed_disjoint.items()}
+            # Small boundary perturbation only.
+            for _ in range(max(1, len(self.G) // 100)):
+                node = random.choice(list(ind.keys()))
+                _op_boundary_reassign(ind, node, self.neighbors_cache)
+            population.append(ind)
+
+        # 35 % — topology-guided overlap injection from HP-MOCD seed.
+        n_overlap = max(1, int(0.35 * self.pop_size))
+        while len(population) < n_exact + n_overlap:
+            population.append(self._guided_overlap_injection(seed_disjoint))
+
+        # 30 % — diverse LPA seeds at different resolutions.
         while len(population) < self.pop_size:
-            if random.random() < 0.70:
-                ind = {node: set(labels) for node, labels in seed_cover.items()}
-                for _ in range(max(2, len(self.G) // 70)):
-                    node = random.choice(list(ind.keys()))
-                    _op_boundary_reassign(ind, node, self.neighbors_cache)
-                population.append(ind)
+            jitter = random.uniform(0.05, 0.20)
+            if random.random() < 0.5:
+                population.append(self._lpa_seed(resolution_jitter=jitter))
             else:
                 population.append(_random_partition(self.G, self.n_communities))
 
-        return population
+        return population[:self.pop_size]
+
+    # ── Offspring generation ─────────────────────────────────────────────────
+
+    def _make_child(
+        self,
+        p1: dict[int, set[int]],
+        p2: dict[int, set[int]],
+        mutation_prob_override: float | None = None,
+    ) -> dict[int, set[int]]:
+        if random.random() < self.crossover_prob:
+            child = _topology_aware_crossover(
+                p1, p2,
+                self.neighbors_cache,
+                self.max_memberships,
+                self.add_second_prob,
+                self.second_support_ratio,
+            )
+        else:
+            child = {node: set(labels) for node, labels in p1.items()}
+
+        mut_prob = mutation_prob_override if mutation_prob_override is not None else self.mutation_prob
+        child, self.max_label_id = _mutate(
+            child,
+            self.neighbors_cache,
+            mut_prob,
+            self.max_memberships,
+            self.max_label_id,
+            k_min=self.k_min,
+            support_ratio_threshold=self.support_ratio_threshold,
+        )
+        return child
+
+    # ── Population management ────────────────────────────────────────────────
 
     def _filter_duplicates(
         self,
@@ -517,7 +795,6 @@ class OverlappingNSGAII:
         seen: dict[tuple, int] = {}
         unique_inds: list[dict[int, set[int]]] = []
         unique_fit: list[tuple[float, ...]] = []
-
         for ind, fit in zip(individuals, fitnesses):
             sig = _partition_signature(ind)
             idx = seen.get(sig)
@@ -526,12 +803,9 @@ class OverlappingNSGAII:
                 unique_inds.append(ind)
                 unique_fit.append(fit)
             else:
-                # Keep the dominating/better fit if duplicate signature appears.
-                current = unique_fit[idx]
-                if self._dominates(fit, current):
+                if self._dominates(fit, unique_fit[idx]):
                     unique_inds[idx] = ind
                     unique_fit[idx] = fit
-
         return unique_inds, unique_fit
 
     def _next_population(
@@ -542,13 +816,11 @@ class OverlappingNSGAII:
         fronts = self._fast_non_dominated_sort(fitnesses)
         new_inds: list[dict[int, set[int]]] = []
         new_fit: list[tuple[float, ...]] = []
-
         for front in fronts:
             if len(new_inds) + len(front) <= self.pop_size:
                 new_inds.extend(individuals[i] for i in front)
                 new_fit.extend(fitnesses[i] for i in front)
                 continue
-
             remaining = self.pop_size - len(new_inds)
             crowd = self._crowding_distance(fitnesses, front)
             ranked = sorted(front, key=lambda i: crowd[i], reverse=True)
@@ -556,67 +828,97 @@ class OverlappingNSGAII:
             new_inds.extend(individuals[i] for i in chosen)
             new_fit.extend(fitnesses[i] for i in chosen)
             break
-
         return new_inds, new_fit
 
-    def _make_child(self, p1: dict[int, set[int]], p2: dict[int, set[int]]) -> dict[int, set[int]]:
-        if random.random() < self.crossover_prob:
-            child = _topology_aware_crossover(
-                p1,
-                p2,
-                self.neighbors_cache,
-                self.max_memberships,
-                self.add_second_prob,
-                self.second_support_ratio,
-            )
-        else:
-            child = {node: set(labels) for node, labels in p1.items()}
+    def _inject_diversity(self, population: list[dict[int, set[int]]]) -> list[dict[int, set[int]]]:
+        """Replace the worst 20 % of the population with fresh individuals."""
+        n_inject = max(1, int(0.20 * self.pop_size))
+        fresh = []
+        for _ in range(n_inject):
+            if random.random() < 0.5:
+                fresh.append(self._lpa_seed(resolution_jitter=random.uniform(0.10, 0.25)))
+            else:
+                fresh.append(_random_partition(self.G, self.n_communities))
+        # Replace tail of population (NSGA-II already orders worst last).
+        return population[: self.pop_size - n_inject] + fresh
 
-        child = _mutate(
-            child,
-            self.neighbors_cache,
-            self.mutation_prob,
-            self.max_memberships,
-            self.support_margin,
-            self.target_overlap_rate,
-            self.max_label_id,
-        )
-        return child
+    # ── Final solution selection ─────────────────────────────────────────────
 
-    def _select_final(self, population: list[dict[int, set[int]]], fitnesses: list[tuple[float, ...]]) -> dict[int, set[int]]:
+    def _select_final(
+        self,
+        population: list[dict[int, set[int]]],
+        fitnesses: list[tuple[float, ...]],
+    ) -> dict[int, set[int]]:
         fronts = self._fast_non_dominated_sort(fitnesses)
         first_front = fronts[0] if fronts else list(range(len(population)))
 
-        # Balanced tie-break inside first Pareto front.
         def score(i: int) -> float:
-            f_mod, f_ov, f_sp, f_gap = fitnesses[i]
-
-            # Balanced (prevents collapse to few communities)
-            return -f_mod - 1.4 * f_ov - 0.5 * f_sp - 6.0 * f_gap
+            f1, f2, f3 = fitnesses[i]
+            # Structure (f1) dominates; overlap quality (f3) weighted to
+            # prefer solutions with good overlap over purely disjoint ones;
+            # conductance (f2) as secondary tiebreak.
+            return -f1 - 0.4 * f2 - 0.6 * f3
 
         best_idx = max(first_front, key=score)
         return population[best_idx]
+
+    # ── Main loop ────────────────────────────────────────────────────────────
 
     def run(self) -> list[frozenset]:
         population = self._seed_population()
         fitnesses = [self._evaluate(ind) for ind in population]
 
+        best_f1 = min(f[0] for f in fitnesses)
+        stagnation_window: deque[float] = deque([best_f1], maxlen=self.patience)
+        consecutive_no_improve = 0
+
         print(
-            f"[OverlappingNSGAII] Starting | pop={self.pop_size} | gen={self.max_gen} | "
-            f"initial_labels~{self.n_communities} | max_memberships={self.max_memberships}"
+            f"[OverlappingNSGAII-v3] Starting | "
+            f"pop={self.pop_size} | gen={self.max_gen} | "
+            f"communities~{self.n_communities} | max_memberships={self.max_memberships} | "
+            f"target_overlap={self.target_overlap_rate:.0%}"
         )
 
         for gen in range(self.max_gen):
-            offspring = []
+            # ── Stagnation check ──────────────────────────────────────────
+            current_best_f1 = min(f[0] for f in fitnesses)
+            if current_best_f1 < best_f1 - 1e-5:
+                best_f1 = current_best_f1
+                consecutive_no_improve = 0
+            else:
+                consecutive_no_improve += 1
+
+            stagnation_window.append(current_best_f1)
+
+            # Detect flat window: all values within 1e-4 of each other.
+            is_stagnant = (
+                consecutive_no_improve >= self.patience
+                and (max(stagnation_window) - min(stagnation_window)) < 1e-4
+            )
+
+            if is_stagnant:
+                population = self._inject_diversity(population)
+                fitnesses = [self._evaluate(ind) for ind in population]
+                consecutive_no_improve = 0
+                print(f"  gen {gen+1:3d} | [STAGNATION] diversity injected")
+
+            # ── Offspring generation ──────────────────────────────────────
+            mut_prob = (
+                min(1.0, self.mutation_prob * self._stagnation_boost_factor)
+                if is_stagnant else self.mutation_prob
+            )
+
+            offspring: list[dict[int, set[int]]] = []
             for _ in range(self.pop_size):
                 p1, p2 = random.sample(population, 2)
-                offspring.append(self._make_child(p1, p2))
+                offspring.append(self._make_child(p1, p2, mutation_prob_override=mut_prob))
 
             offspring_fit = [self._evaluate(ind) for ind in offspring]
             combined = population + offspring
             combined_fit = fitnesses + offspring_fit
             combined, combined_fit = self._filter_duplicates(combined, combined_fit)
 
+            # Pad if deduplication collapsed the pool.
             while len(combined) < self.pop_size:
                 rnd = _random_partition(self.G, self.n_communities)
                 combined.append(rnd)
@@ -624,12 +926,17 @@ class OverlappingNSGAII:
 
             population, fitnesses = self._next_population(combined, combined_fit)
 
-
+            # ── Progress logging ──────────────────────────────────────────
             if (gen + 1) % 10 == 0:
-                best = min(fitnesses, key=lambda f: f[0] + 0.9 * f[1] + 0.6 * f[2] + 5.0 * f[3])
+                best = min(fitnesses, key=lambda f: f[0] + 0.4 * f[1] + 0.6 * f[2])
+                # Count overlap nodes in the best individual on the Pareto front.
+                fronts_now = self._fast_non_dominated_sort(fitnesses)
+                best_idx = max(fronts_now[0], key=lambda i: -(fitnesses[i][0] + 0.4*fitnesses[i][1] + 0.6*fitnesses[i][2]))
+                ovlp_count = sum(1 for labels in population[best_idx].values() if len(labels) > 1)
                 print(
                     f"  gen {gen+1:3d}/{self.max_gen} | "
-                    f"f_mod={best[0]:.4f} f_ov={best[1]:.4f} f_sp={best[2]:.4f} f_gap={best[3]:.4f}"
+                    f"f_mod={best[0]:.4f} f_cond={best[1]:.4f} f_ovlp={best[2]:.4f} | "
+                    f"overlap_nodes={ovlp_count}"
                 )
 
         best_partition = self._select_final(population, fitnesses)
@@ -637,11 +944,15 @@ class OverlappingNSGAII:
         overlap_nodes = sum(1 for labels in best_partition.values() if len(labels) > 1)
 
         print(
-            f"[OverlappingNSGAII] Done | communities={len(result)} | "
-            f"overlapping_nodes={overlap_nodes}"
+            f"[OverlappingNSGAII-v3] Done | "
+            f"communities={len(result)} | overlapping_nodes={overlap_nodes}"
         )
         return result
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  PUBLIC ENTRY POINT  (interface unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
 
 def run_hp_mocd_overlapping(
     G: nx.Graph,
@@ -650,6 +961,22 @@ def run_hp_mocd_overlapping(
     n_communities: int | None = None,
     seed_partition: list[frozenset] | None = None,
 ) -> tuple[list[frozenset], float]:
+    """
+    Run the improved overlapping HP-MOCD extension and return (partition, runtime).
+
+    Parameters
+    ----------
+    G               : nx.Graph — input graph
+    cfg             : dict     — hyperparameters (from config.py)
+    max_memberships : int      — maximum communities per node (default 2)
+    n_communities   : int|None — override community count (None = auto)
+    seed_partition  : list[frozenset]|None — external disjoint seed (None = HP-MOCD)
+
+    Returns
+    -------
+    partition : list[frozenset] — overlapping community cover
+    runtime   : float           — wall-clock seconds
+    """
     t0 = time.perf_counter()
     model = OverlappingNSGAII(
         G,
@@ -660,7 +987,7 @@ def run_hp_mocd_overlapping(
     )
     best = model.run()
     runtime = time.perf_counter() - t0
-    print(f"[HP-MOCD Overlapping] communities={len(best)}, runtime={runtime:.2f}s")
+    print(f"[HP-MOCD Overlapping v3] communities={len(best)}, runtime={runtime:.2f}s")
     return best, runtime
 
 

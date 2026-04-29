@@ -20,21 +20,19 @@ HPMOCD_CONFIG = {
 
     # ── Overlapping behavior (KEY SECTION) ───────────────────────
     # Controls how often overlap is introduced
-    "overlap_add_second_prob":      0.35,   # ↑ (was 0.22)
+        "overlap_add_second_prob":      0.35,   # ↑ (was 0.22)
 
-    # Controls quality threshold for adding overlap
-    "overlap_second_support_ratio": 0.55,   # ↓ (was 0.70)
-
-    # Controls strictness of adding second membership
-    "overlap_support_margin":       2,      # ↓ (was 3)
-
+    "overlap_second_support_ratio": 0.30,  # was 0.55 — relax it; let crossover add more overlap
+    "overlap_support_margin":       2,     # used as k_min — keep at 2
+    "early_stop_patience":          20,    # rolling window for stagnation
+    
     # ── NEW: explicit community control ──────────────────────────
     "n_communities": 22,  # match LFR ground truth (CRITICAL)
 
     "target_overlap_rate": 0.20,
 
-    # ── NEW: encourage exploration stability ─────────────────────
-    "early_stop_patience": 30,  # avoid early stagnation
+    # # ── NEW: encourage exploration stability ─────────────────────
+    # "early_stop_patience": 30,  # avoid early stagnation
 }
 
 # Development override: set the environment variable `CI_DEV=1` to
