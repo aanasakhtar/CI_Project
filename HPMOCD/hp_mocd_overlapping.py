@@ -166,6 +166,7 @@ def _evaluate_objectives(
     partition: dict[int, set[int]],
     neighbors_cache: dict[int, list[int]],
     target_overlap_rate: float,
+    target_n_communities: int,
 ) -> tuple[float, float, float, float]:
     """Return minimization objectives:
 
@@ -173,10 +174,15 @@ def _evaluate_objectives(
     """
     f_mod = _modularity_objective(G, partition, neighbors_cache)
 
+    num_comms = len(_partition_to_frozensets(partition))
+    target = target_n_communities
+    comm_penalty = abs(num_comms - target) / target
+
     edge_agree = _edge_membership_agreement(G, partition)
     support_quality = _overlap_support_quality(partition, neighbors_cache)
     target_gap = _overlap_target_gap(partition, target_overlap_rate)
 
+    # Rebalanced overlap (less dominant)
     overlap_quality = 0.6 * edge_agree + 0.4 * support_quality
     f_overlap = 1.0 - overlap_quality
 
@@ -399,7 +405,7 @@ class OverlappingNSGAII:
         self.n_communities = _resolve_n_communities(G, cfg, n_communities)
         self.max_label_id = max(self.n_communities * 4, len(G) - 1)
 
-        self.target_overlap_rate = min(0.95, max(0.01, cfg.get("overlap_n", 100) / max(1, len(G))))
+        self.target_overlap_rate = cfg.get("target_overlap_rate", cfg.get("overlap_n", 100) / max(1, len(G)))
         self.add_second_prob = float(cfg.get("overlap_add_second_prob", 0.10))
         self.second_support_ratio = float(cfg.get("overlap_second_support_ratio", 0.90))
         self.support_margin = int(cfg.get("overlap_support_margin", 3))
@@ -479,6 +485,7 @@ class OverlappingNSGAII:
             individual,
             self.neighbors_cache,
             target_overlap_rate=self.target_overlap_rate,
+            target_n_communities=self.n_communities,   # ✅ add this
         )
         self.fitness_cache[signature] = fit
         return fit
@@ -493,7 +500,7 @@ class OverlappingNSGAII:
         while len(population) < self.pop_size:
             if random.random() < 0.70:
                 ind = {node: set(labels) for node, labels in seed_cover.items()}
-                for _ in range(max(1, len(self.G) // 100)):
+                for _ in range(max(2, len(self.G) // 70)):
                     node = random.choice(list(ind.keys()))
                     _op_boundary_reassign(ind, node, self.neighbors_cache)
                 population.append(ind)
@@ -583,7 +590,9 @@ class OverlappingNSGAII:
         # Balanced tie-break inside first Pareto front.
         def score(i: int) -> float:
             f_mod, f_ov, f_sp, f_gap = fitnesses[i]
-            return -f_mod - 0.9 * f_ov - 0.6 * f_sp - 5.0 * f_gap
+
+            # Balanced (prevents collapse to few communities)
+            return -f_mod - 1.4 * f_ov - 0.5 * f_sp - 6.0 * f_gap
 
         best_idx = max(first_front, key=score)
         return population[best_idx]
@@ -614,6 +623,7 @@ class OverlappingNSGAII:
                 combined_fit.append(self._evaluate(rnd))
 
             population, fitnesses = self._next_population(combined, combined_fit)
+
 
             if (gen + 1) % 10 == 0:
                 best = min(fitnesses, key=lambda f: f[0] + 0.9 * f[1] + 0.6 * f[2] + 5.0 * f[3])
