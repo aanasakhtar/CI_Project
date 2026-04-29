@@ -1,47 +1,55 @@
-"""
-run_experiment.py
-═════════════════
-Runs all five methods on both datasets and prints a comparison table.
-
-Methods compared
-────────────────
-  1. HP-MOCD baseline      — disjoint, evolutionary (pymocd / MinimalNSGAII)
-  2. Overlapping extension — overlapping, evolutionary (your extension)
-  3. MCMOEA                - overlapping, multi-community evolutionary
-  4. CPM original          — overlapping, structural, NCN problem present
-  5. CPM NCN-fixed         — overlapping, structural, all nodes covered
-
-Usage
-─────
-    python run_experiment.py                  # both datasets
-    python run_experiment.py --dataset lfr
-    python run_experiment.py --dataset dblp
-"""
 
 import sys
 import argparse
 import json
 import os
+import traceback
 from pathlib import Path
 from collections import Counter
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+print(f"[INFO] Python {sys.version}")
+print(f"[INFO] Project root: {PROJECT_ROOT}")
+
+# ── Verify files exist before importing ───────────────────────────────────
+slpa_path = PROJECT_ROOT / "HPMOCD" / "slpa.py"
+if not slpa_path.exists():
+    print(f"\n[ERROR] slpa.py not found at: {slpa_path}")
+    print("  Copy slpa.py into your HPMOCD/ folder and re-run.")
+    sys.exit(1)
+
+print(f"[OK] slpa.py found at              {slpa_path}")
+
+# ── Imports ───────────────────────────────────────────────────────────────────
 import networkx as nx
 
-from HPMOCD.hp_mocd_baseline        import run_hp_mocd
-from HPMOCD.hp_mocd_overlapping     import run_hp_mocd_overlapping
-from HPMOCD.mcmoea                  import run_mcmoea
-from HPMOCD.cpm_community_detection import run_cpm_original, run_cpm_ncn_fixed
-from evaluation.metrics               import evaluate_disjoint, evaluate_overlapping
+try:
+    from HPMOCD.hp_mocd_baseline        import run_hp_mocd
+    from HPMOCD.hp_mocd_overlapping     import run_hp_mocd_overlapping
+    from HPMOCD.mcmoea                  import run_mcmoea
+    from HPMOCD.cpm_community_detection import run_cpm_original, run_cpm_ncn_fixed
+    from HPMOCD.slpa                    import run_slpa
+    from evaluation.metrics             import evaluate_disjoint, evaluate_overlapping
+    print("[OK] All imports successful.\n")
+except ImportError as e:
+    print(f"\n[IMPORT ERROR] {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+ALL_METHODS = ["hpmocd", "hpmocd_ovlp", "mcmoea", "cpm_orig", "cpm_fixed", "slpa"]
+
+# Evolution parameters
+POP_SIZE = 100
+GENERATIONS = 100
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _count_overlapping_nodes(partition: list[frozenset]) -> int:
+def _count_overlapping_nodes(partition: list) -> int:
     node_counts: Counter = Counter()
     for community in partition:
         for node in community:
@@ -49,18 +57,18 @@ def _count_overlapping_nodes(partition: list[frozenset]) -> int:
     return sum(1 for c in node_counts.values() if c > 1)
 
 
-def _count_assigned_nodes(partition: list[frozenset]) -> int:
+def _count_assigned_nodes(partition: list) -> int:
     return len(set().union(*partition)) if partition else 0
 
 
 def _save_memberships(
-    partition: list[frozenset],
+    partition: list,
     label: str,
     dataset_name: str,
     output_dir: str = "outputs",
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    node_to_communities: dict[str, list] = {}
+    node_to_communities: dict = {}
     for cid, community in enumerate(partition):
         for node in community:
             node_to_communities.setdefault(str(node), []).append(cid)
@@ -70,213 +78,208 @@ def _save_memberships(
     path = os.path.join(output_dir, f"{safe_dataset}_{safe_label}_memberships.json")
     with open(path, "w") as f:
         json.dump(node_to_communities, f)
-    print(f"   Saved memberships: {path}")
+    print(f"   Saved memberships → {path}")
 
 
 def _print_method_result(
     label: str,
-    partition: list[frozenset],
+    partition: list,
     runtime: float,
     n_total_nodes: int,
-    scores: dict[str, float],
+    scores: dict,
     extra_info: str = "",
 ) -> None:
     n_assigned    = _count_assigned_nodes(partition)
     n_overlapping = _count_overlapping_nodes(partition)
     print(f"\n>> {label}")
-    print(f"   Communities: {len(partition)} | "
-          f"Runtime: {runtime:.2f}s | "
-          f"Overlapping nodes: {n_overlapping}/{n_total_nodes} | "
-          f"Assigned: {n_assigned}/{n_total_nodes}"
-          + (f" | {extra_info}" if extra_info else ""))
+    print(f"   Communities   : {len(partition)}")
+    print(f"   Runtime       : {runtime:.2f}s")
+    print(f"   Overlap nodes : {n_overlapping}/{n_total_nodes}")
+    print(f"   Assigned nodes: {n_assigned}/{n_total_nodes}"
+          + (f"  [{extra_info}]" if extra_info else ""))
     score_str = "  |  ".join(f"{k}={v:.4f}" for k, v in scores.items())
-    print(f"  [{label}]  {score_str}")
+    print(f"   Scores → {score_str}")
 
 
-def _print_comparison_table(results: list[dict], metrics: list[str]) -> None:
-    col_w   = 16
-    label_w = 22
+def _print_comparison_table(results: list, metrics: list) -> None:
+    col_w   = 18
+    label_w = 16
     width   = label_w + col_w * len(results) + 4
 
-    print(f"\n{'-' * width}")
+    print(f"\n{'═' * width}")
+    print("  COMPARISON TABLE")
+    print(f"{'═' * width}")
     header = f"  {'Metric':<{label_w}}"
     for r in results:
         header += f"{r['label']:>{col_w}}"
     print(header)
-    print(f"{'-' * width}")
+    print(f"{'─' * width}")
 
     for metric in metrics:
         row    = f"  {metric:<{label_w}}"
         values = [r["scores"].get(metric, float("nan")) for r in results]
-        # best = max, ignoring nan
         valid  = [v for v in values if v == v]
         best_val = max(valid) if valid else float("nan")
         for v in values:
-            if v != v:  # nan
-                cell = "N/A"
-                row += f"{cell:>{col_w}}"
+            if v != v:
+                row += f"{'N/A':>{col_w}}"
             else:
                 marker = "<" if abs(v - best_val) < 1e-6 else " "
                 row += f"{v:>{col_w - 2}.4f} {marker} "
         print(row)
 
-    print(f"{'-' * width}")
-
+    print(f"{'─' * width}")
+    
+    # Runtime row
     row = f"  {'Runtime (s)':<{label_w}}"
     for r in results:
         row += f"{r['runtime']:>{col_w - 1}.2f}s"
     print(row)
-
+    
+    # Communities row
     row = f"  {'Communities':<{label_w}}"
     for r in results:
         row += f"{r['n_communities']:>{col_w}}"
     print(row)
-
+    
+    # Overlap nodes row
     row = f"  {'Overlap nodes':<{label_w}}"
     for r in results:
         row += f"{r['n_overlapping']:>{col_w}}"
     print(row)
-
+    
+    # Assigned nodes row
     row = f"  {'Assigned nodes':<{label_w}}"
     for r in results:
         row += f"{r['n_assigned']:>{col_w}}"
     print(row)
 
-    print(f"{'-' * width}")
+    print(f"{'═' * width}")
     print("  < = best value for that metric\n")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CORE: run all methods on one graph
-# ══════════════════════════════════════════════════════════════════════════════
-
 def _run_all_methods(
     G: nx.Graph,
-    ground_truth: list[frozenset],
+    ground_truth: list,
     dataset_name: str,
     is_overlapping_gt: bool,
+    methods: list,
 ) -> None:
     n_nodes = G.number_of_nodes()
 
-    print(f"\n{'=' * 65}")
+    print(f"\n{'═' * 65}")
     print(f"  DATASET : {dataset_name}")
     print(f"  Nodes   : {n_nodes}   Edges: {G.number_of_edges()}")
     print(f"  Ground-truth communities : {len(ground_truth)}")
     gt_overlapping = _count_overlapping_nodes(ground_truth)
-    print(f"  Ground-truth overlapping : {gt_overlapping}/{n_nodes} "
+    print(f"  GT overlapping nodes     : {gt_overlapping}/{n_nodes} "
           f"({100 * gt_overlapping / n_nodes:.1f}%)")
-    print(f"{'=' * 65}")
+    print(f"{'═' * 65}")
 
     evaluate_fn = evaluate_overlapping if is_overlapping_gt else evaluate_disjoint
     results = []
 
-    # ── 1. HP-MOCD baseline ───────────────────────────────────────────────────
-    print("\n>> Running HP-MOCD baseline (disjoint) ...")
-    p_base, _, rt_base = run_hp_mocd(G)
-    s_base = evaluate_fn(G, p_base, ground_truth)
-    _print_method_result("HP-MOCD Baseline", p_base, rt_base, n_nodes, s_base)
-    _save_memberships(p_base, "baseline", dataset_name)
-    results.append({
-        "label": "HP-MOCD",
-        "scores": s_base, "runtime": rt_base,
-        "n_communities": len(p_base),
-        "n_overlapping": _count_overlapping_nodes(p_base),
-        "n_assigned":    _count_assigned_nodes(p_base),
-    })
+    def _safe_run(method_key, runner_fn, label, save_label):
+        """Run a method with full error reporting."""
+        print(f"\n{'─' * 50}")
+        print(f"  Starting: {label}")
+        print(f"{'─' * 50}")
+        try:
+            ret = runner_fn()
+            partition, runtime = ret[0], ret[1]
+            
+            # skip evaluation if partition is empty
+            if not partition or len(partition) == 0:
+                print(f"  [WARNING] {label} returned empty partition, skipping evaluation")
+                scores = {m: float("nan") for m in ["NMI", "AMI", "Modularity", "F1", "Omega"]}
+            else:
+                scores = evaluate_fn(G, partition, ground_truth)
+                
+            _print_method_result(label, partition, runtime, n_nodes, scores)
+            _save_memberships(partition, save_label, dataset_name)
+            results.append({
+                "label": label,
+                "scores": scores,
+                "runtime": runtime,
+                "n_communities": len(partition),
+                "n_overlapping": _count_overlapping_nodes(partition),
+                "n_assigned":    _count_assigned_nodes(partition),
+            })
+        except Exception as exc:
+            print(f"  [ERROR in {label}]: {exc}")
+            traceback.print_exc()
 
-    # ── 2. Overlapping extension ──────────────────────────────────────────────
-    print("\n>> Running overlapping HP-MOCD extension ...")
-    p_ovlp, rt_ovlp = run_hp_mocd_overlapping(G, max_memberships=2)
-    s_ovlp = evaluate_fn(G, p_ovlp, ground_truth)
-    _print_method_result("HP-MOCD Overlapping", p_ovlp, rt_ovlp, n_nodes, s_ovlp)
-    _save_memberships(p_ovlp, "overlapping", dataset_name)
-    results.append({
-        "label": "HP-MOCD-Ovlp",
-        "scores": s_ovlp, "runtime": rt_ovlp,
-        "n_communities": len(p_ovlp),
-        "n_overlapping": _count_overlapping_nodes(p_ovlp),
-        "n_assigned":    _count_assigned_nodes(p_ovlp),
-    })
+    # ── 1. HP-MOCD baseline (disjoint) ──────────────────────────────────────
+    if "hpmocd" in methods:
+        def _f1():
+            p, _, rt = run_hp_mocd(G)  # No pop_size or n_gen needed
+            return p, rt
+        _safe_run("hpmocd", _f1, "HP-MOCD", "baseline")
 
-    # -- 3. MCMOEA ------------------------------------------------------------
-    print("\n>> Running MCMOEA (multi-community multi-objective evolutionary) ...")
-    p_mcmoea, rt_mcmoea = run_mcmoea(G, max_memberships=2)
-    s_mcmoea = evaluate_fn(G, p_mcmoea, ground_truth)
-    _print_method_result("MCMOEA", p_mcmoea, rt_mcmoea, n_nodes, s_mcmoea)
-    _save_memberships(p_mcmoea, "mcmoea", dataset_name)
-    results.append({
-        "label": "MCMOEA",
-        "scores": s_mcmoea, "runtime": rt_mcmoea,
-        "n_communities": len(p_mcmoea),
-        "n_overlapping": _count_overlapping_nodes(p_mcmoea),
-        "n_assigned":    _count_assigned_nodes(p_mcmoea),
-    })
+    # ── 2. Overlapping extension ─────────────────────────────────────────────
+    if "hpmocd_ovlp" in methods:
+        def _f2():
+            return run_hp_mocd_overlapping(G, max_memberships=2)  # No pop_size or n_gen
+        _safe_run("hpmocd_ovlp", _f2, "HP-MOCD-Ovlp", "overlapping")
 
-    print("\n>> Running CPM original (NCN problem present) ...")
-    p_cpm_orig, rt_cpm_orig, k_orig = run_cpm_original(G)
-    n_unassigned = n_nodes - _count_assigned_nodes(p_cpm_orig)
-    if p_cpm_orig:
-        s_cpm_orig = evaluate_fn(G, p_cpm_orig, ground_truth)
-    else:
-        s_cpm_orig = {m: float("nan") for m in s_base.keys()}
-    _print_method_result(
-        f"CPM Original (k={k_orig})", p_cpm_orig, rt_cpm_orig, n_nodes, s_cpm_orig,
-        extra_info=f"unassigned={n_unassigned}",
-    )
-    _save_memberships(p_cpm_orig, "cpm_original", dataset_name)
-    results.append({
-        "label": f"CPM-Orig(k={k_orig})",
-        "scores": s_cpm_orig, "runtime": rt_cpm_orig,
-        "n_communities": len(p_cpm_orig),
-        "n_overlapping": _count_overlapping_nodes(p_cpm_orig),
-        "n_assigned":    _count_assigned_nodes(p_cpm_orig),
-    })
+    # ── 3. MCMOEA ────────────────────────────────────────────────────────────
+    if "mcmoea" in methods:
+        def _f3():
+            return run_mcmoea(G, max_memberships=2)  # No pop_size or n_gen
+        _safe_run("mcmoea", _f3, "MCMOEA", "mcmoea")
 
-    # ── 4. CPM NCN-fixed ──────────────────────────────────────────────────────
-    print("\n>> Running CPM NCN-fixed (all nodes assigned) ...")
-    p_cpm_fix, rt_cpm_fix, k_fix = run_cpm_ncn_fixed(G)
-    s_cpm_fix = evaluate_fn(G, p_cpm_fix, ground_truth)
-    _print_method_result(
-        f"CPM NCN-Fixed (k={k_fix})", p_cpm_fix, rt_cpm_fix, n_nodes, s_cpm_fix,
-    )
-    _save_memberships(p_cpm_fix, "cpm_ncn_fixed", dataset_name)
-    results.append({
-        "label": f"CPM-Fixed(k={k_fix})",
-        "scores": s_cpm_fix, "runtime": rt_cpm_fix,
-        "n_communities": len(p_cpm_fix),
-        "n_overlapping": _count_overlapping_nodes(p_cpm_fix),
-        "n_assigned":    _count_assigned_nodes(p_cpm_fix),
-    })
+    # ── 4. CPM Original ──────────────────────────────────────────────────────
+    if "cpm_orig" in methods:
+        def _f4():
+            p, rt, _ = run_cpm_original(G)
+            return p, rt
+        _safe_run("cpm_orig", _f4, "CPM-Orig(k=3)", "cpm_original")
 
-    # ── Comparison table ──────────────────────────────────────────────────────
-    _print_comparison_table(results, list(s_base.keys()))
+    # ── 5. CPM Fixed ─────────────────────────────────────────────────────────
+    if "cpm_fixed" in methods:
+        def _f5():
+            p, rt, _ = run_cpm_ncn_fixed(G)
+            return p, rt
+        _safe_run("cpm_fixed", _f5, "CPM-Fixed(k=3)", "cpm_ncn_fixed")
+
+    # ── 6. SLPA ──────────────────────────────────────────────────────────────
+    if "slpa" in methods:
+        def _f6():
+            return run_slpa(G, T=20, r=0.1)
+        _safe_run("slpa", _f6, "SLPA", "slpa")
+    
+    # ── Print comparison table ───────────────────────────────────────────────
+    _print_comparison_table(results, ["NMI", "AMI", "Modularity", "F1", "Omega"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  DATASET RUNNERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_lfr() -> None:
-    print("\nLoading LFR benchmark ...")
+def run_lfr(methods: list) -> None:
+    print("\n[STEP] Loading LFR benchmark ...")
     try:
         from data.load_lfr import load_lfr_overlapping
         G, ground_truth = load_lfr_overlapping()
         label = "LFR Overlapping Benchmark"
         is_overlapping = True
-    except TypeError as e:
-        print(f"  [WARNING] Overlapping LFR not available ({e}), using disjoint.")
+        print(f"[OK] Loaded LFR overlapping: {G.number_of_nodes()} nodes")
+    except Exception as e:
+        print(f"[WARNING] Overlapping LFR failed ({e}), falling back to disjoint.")
         from data.load_lfr import load_lfr_disjoint
         G, ground_truth = load_lfr_disjoint()
         label = "LFR Disjoint Benchmark"
         is_overlapping = False
-    _run_all_methods(G, ground_truth, label, is_overlapping_gt=is_overlapping)
+        print(f"[OK] Loaded LFR disjoint: {G.number_of_nodes()} nodes")
+    _run_all_methods(G, ground_truth, label, is_overlapping, methods)
 
 
-def run_dblp() -> None:
-    print("\nLoading DBLP ...")
+def run_dblp(methods: list) -> None:
+    print("\n[STEP] Loading DBLP ...")
     from data.load_dblp import load_dblp
     G, ground_truth = load_dblp()
-    _run_all_methods(G, ground_truth, "DBLP Co-authorship", is_overlapping_gt=True)
+    print(f"[OK] Loaded DBLP: {G.number_of_nodes()} nodes")
+    _run_all_methods(G, ground_truth, "DBLP Co-authorship", True, methods)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -284,10 +287,29 @@ def run_dblp() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", choices=["lfr", "dblp", "both"], default="both")
+    parser = argparse.ArgumentParser(
+        description="Run community detection methods and compare results."
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["lfr", "dblp", "both"],
+        default="both",
+    )
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=ALL_METHODS,
+        default=ALL_METHODS,
+        help=f"Methods to run. Options: {ALL_METHODS}",
+    )
     args = parser.parse_args()
+
+    print(f"[INFO] Dataset  : {args.dataset}")
+    print(f"[INFO] Methods  : {args.methods}")
+    print(f"[INFO] Evolution: pop_size={POP_SIZE}, generations={GENERATIONS}")
+
     if args.dataset in ("lfr", "both"):
-        run_lfr()
+        run_lfr(methods=args.methods)
+
     if args.dataset in ("dblp", "both"):
-        run_dblp()
+        run_dblp(methods=args.methods)
