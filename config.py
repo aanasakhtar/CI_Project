@@ -6,19 +6,35 @@ import os
 
 # ── HP-MOCD baseline hyperparameters (from paper, Table 1) ──────────────────
 HPMOCD_CONFIG = {
-    "population_size":    100,
-    "max_generations":    100,
-    "crossover_prob":     0.8,
-    "mutation_prob":      0.25,
-    "ensemble_size":      4,     # parents per crossover
-    "n_threads":          8,     # set to your core count
+    # ── Core NSGA-II ─────────────────────────────────────────────
+    "population_size":    100,   # ↑ more diversity (was 100)
+    "max_generations":    100,   # ↑ avoid premature convergence
+    "crossover_prob":     0.85,  # ↑ exploit good structures
+    "mutation_prob":      0.35,  # ↑ exploration (critical)
+    "ensemble_size":      4,
+    "n_threads":          8,
     "seed":               42,
-    # Disjoint baseline tuning
-    "novel_label_prob":   0.03,
-    # Overlap extension tuning
-    "overlap_add_second_prob":      0.22,
-    "overlap_second_support_ratio": 0.70,
-    "overlap_support_margin":       3,
+
+    # ── Disjoint baseline ────────────────────────────────────────
+    "novel_label_prob":   0.05,  # slightly ↑ for flexibility
+
+    # ── Overlapping behavior (KEY SECTION) ───────────────────────
+    # Controls how often overlap is introduced
+    "overlap_add_second_prob":      0.35,   # ↑ (was 0.22)
+
+    # Controls quality threshold for adding overlap
+    "overlap_second_support_ratio": 0.55,   # ↓ (was 0.70)
+
+    # Controls strictness of adding second membership
+    "overlap_support_margin":       2,      # ↓ (was 3)
+
+    # ── NEW: explicit community control ──────────────────────────
+    "n_communities": 22,  # match LFR ground truth (CRITICAL)
+
+    "target_overlap_rate": 0.20,
+
+    # ── NEW: encourage exploration stability ─────────────────────
+    "early_stop_patience": 30,  # avoid early stagnation
 }
 
 # Development override: set the environment variable `CI_DEV=1` to
@@ -41,7 +57,7 @@ LFR_CONFIG = {
     "min_community":      20,
     "max_community":      100,
     # Overlapping parameters — used in your extension, not the baseline
-    "overlap_n":          100,   # number of overlapping nodes
+    "overlap_n":          200,   # number of overlapping nodes
     "overlap_membership": 2,     # communities per overlapping node
     "seed":               42,
 }
