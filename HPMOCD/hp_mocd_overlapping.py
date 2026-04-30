@@ -868,34 +868,54 @@ class OverlappingNSGAII:
         population = self._seed_population()
         fitnesses = [self._evaluate(ind) for ind in population]
 
-        best_f1 = min(f[0] for f in fitnesses)
-        stagnation_window: deque[float] = deque([best_f1], maxlen=self.patience)
+        # ══════════════════════════════════════════════════════════════════
+        # TWO-PHASE EVOLUTION
+        # ══════════════════════════════════════════════════════════════════
+        #
+        # Phase 1 (first 40 % of generations): DISJOINT ONLY.
+        #   Overlap operators disabled by setting effective_max_memberships=1.
+        #   Only f1 (modularity) + f2 (conductance) drive evolution.
+        #   Goal: reach a strong disjoint partition before introducing overlap.
+        #
+        # Phase 2 (remaining 60 %): OVERLAP ALLOWED.
+        #   All operators and objectives active.  Starting from a good
+        #   disjoint base means overlap is added into solid structure.
+        # ══════════════════════════════════════════════════════════════════
+
+        phase1_gens = max(10, int(0.40 * self.max_gen))
+
+        def _composite(fit: tuple) -> float:
+            return fit[0] + 0.4 * fit[1] + 0.6 * fit[2]
+
+        best_composite = min(_composite(f) for f in fitnesses)
+        stagnation_window: deque[float] = deque([best_composite], maxlen=self.patience)
         consecutive_no_improve = 0
 
         print(
             f"[OverlappingNSGAII-v3] Starting | "
             f"pop={self.pop_size} | gen={self.max_gen} | "
             f"communities~{self.n_communities} | max_memberships={self.max_memberships} | "
-            f"target_overlap={self.target_overlap_rate:.0%}"
+            f"target_overlap={self.target_overlap_rate:.0%} | "
+            f"phase1={phase1_gens}gen / phase2={self.max_gen - phase1_gens}gen"
         )
 
         for gen in range(self.max_gen):
-            # ── Stagnation check ──────────────────────────────────────────
-            current_best_f1 = min(f[0] for f in fitnesses)
-            if current_best_f1 < best_f1 - 1e-5:
-                best_f1 = current_best_f1
+            in_phase1 = gen < phase1_gens
+
+            # ── Stagnation check (phase 2 only) ──────────────────────────
+            current_best = min(_composite(f) for f in fitnesses)
+            if current_best < best_composite - 1e-5:
+                best_composite = current_best
                 consecutive_no_improve = 0
             else:
                 consecutive_no_improve += 1
+            stagnation_window.append(current_best)
 
-            stagnation_window.append(current_best_f1)
-
-            # Detect flat window: all values within 1e-4 of each other.
             is_stagnant = (
-                consecutive_no_improve >= self.patience
+                not in_phase1
+                and consecutive_no_improve >= self.patience
                 and (max(stagnation_window) - min(stagnation_window)) < 1e-4
             )
-
             if is_stagnant:
                 population = self._inject_diversity(population)
                 fitnesses = [self._evaluate(ind) for ind in population]
@@ -907,42 +927,69 @@ class OverlappingNSGAII:
                 min(1.0, self.mutation_prob * self._stagnation_boost_factor)
                 if is_stagnant else self.mutation_prob
             )
+            effective_max_mem = 1 if in_phase1 else self.max_memberships
 
             offspring: list[dict[int, set[int]]] = []
             for _ in range(self.pop_size):
                 p1, p2 = random.sample(population, 2)
-                offspring.append(self._make_child(p1, p2, mutation_prob_override=mut_prob))
+                if random.random() < self.crossover_prob:
+                    child = _topology_aware_crossover(
+                        p1, p2, self.neighbors_cache,
+                        effective_max_mem,
+                        self.add_second_prob, self.second_support_ratio,
+                    )
+                else:
+                    child = {node: set(labels) for node, labels in p1.items()}
+                child, self.max_label_id = _mutate(
+                    child, self.neighbors_cache, mut_prob,
+                    effective_max_mem, self.max_label_id,
+                    k_min=self.k_min,
+                    support_ratio_threshold=self.support_ratio_threshold,
+                )
+                offspring.append(child)
 
             offspring_fit = [self._evaluate(ind) for ind in offspring]
             combined = population + offspring
             combined_fit = fitnesses + offspring_fit
             combined, combined_fit = self._filter_duplicates(combined, combined_fit)
-
-            # Pad if deduplication collapsed the pool.
             while len(combined) < self.pop_size:
                 rnd = _random_partition(self.G, self.n_communities)
                 combined.append(rnd)
                 combined_fit.append(self._evaluate(rnd))
-
             population, fitnesses = self._next_population(combined, combined_fit)
+
+            # ── Phase transition ──────────────────────────────────────────
+            if gen + 1 == phase1_gens:
+                best_f1_now = min(f[0] for f in fitnesses)
+                print(
+                    f"  gen {gen+1:3d} | >>> PHASE 2 START "
+                    f"(best f_mod={best_f1_now:.4f}) <<<"
+                )
+                consecutive_no_improve = 0
+                best_composite = min(_composite(f) for f in fitnesses)
+                stagnation_window.clear()
+                stagnation_window.append(best_composite)
 
             # ── Progress logging ──────────────────────────────────────────
             if (gen + 1) % 10 == 0:
-                best = min(fitnesses, key=lambda f: f[0] + 0.4 * f[1] + 0.6 * f[2])
-                # Count overlap nodes in the best individual on the Pareto front.
+                best_fit = min(fitnesses, key=_composite)
                 fronts_now = self._fast_non_dominated_sort(fitnesses)
-                best_idx = max(fronts_now[0], key=lambda i: -(fitnesses[i][0] + 0.4*fitnesses[i][1] + 0.6*fitnesses[i][2]))
-                ovlp_count = sum(1 for labels in population[best_idx].values() if len(labels) > 1)
+                best_idx = max(fronts_now[0], key=lambda i: -_composite(fitnesses[i]))
+                ovlp_count = sum(
+                    1 for labels in population[best_idx].values() if len(labels) > 1
+                )
+                phase_tag = "P1" if in_phase1 else "P2"
                 print(
-                    f"  gen {gen+1:3d}/{self.max_gen} | "
-                    f"f_mod={best[0]:.4f} f_cond={best[1]:.4f} f_ovlp={best[2]:.4f} | "
+                    f"  gen {gen+1:3d}/{self.max_gen} [{phase_tag}] | "
+                    f"f_mod={best_fit[0]:.4f} "
+                    f"f_cond={best_fit[1]:.4f} "
+                    f"f_ovlp={best_fit[2]:.4f} | "
                     f"overlap_nodes={ovlp_count}"
                 )
 
         best_partition = self._select_final(population, fitnesses)
         result = _partition_to_frozensets(best_partition)
         overlap_nodes = sum(1 for labels in best_partition.values() if len(labels) > 1)
-
         print(
             f"[OverlappingNSGAII-v3] Done | "
             f"communities={len(result)} | overlapping_nodes={overlap_nodes}"
