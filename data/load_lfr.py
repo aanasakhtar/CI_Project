@@ -119,7 +119,7 @@ def load_lfr_overlapping(cfg: dict = LFR_CONFIG) -> tuple[nx.Graph, list[frozens
     return G_clean, communities
 
 
-# ── Quick sanity check ───────────────────────────────────────────────────────
+# Quick sanity check
 if __name__ == "__main__":
     G_d, cmty_d = load_lfr_disjoint()
     G_o, cmty_o = load_lfr_overlapping()

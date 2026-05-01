@@ -4,9 +4,9 @@ Edit these values before running any module.
 """
 import os
 
-# ── HP-MOCD baseline hyperparameters (from paper, Table 1) ──────────────────
+# HP-MOCD baseline hyperparameters (from paper, Table 1)
 HPMOCD_CONFIG = {
-    # ── Core NSGA-II ─────────────────────────────────────────────
+    # Core NSGA-II
     "population_size":    100,   # ↑ more diversity (was 100)
     "max_generations":    100,   # ↑ avoid premature convergence
     "crossover_prob":     0.85,  # ↑ exploit good structures
@@ -15,10 +15,10 @@ HPMOCD_CONFIG = {
     "n_threads":          8,
     "seed":               42,
 
-    # ── Disjoint baseline ────────────────────────────────────────
+    # Disjoint baseline
     "novel_label_prob":   0.05,  # slightly ↑ for flexibility
 
-    # ── Overlapping behavior (KEY SECTION) ───────────────────────
+    # Overlapping behavior (KEY SECTION)
     # Controls how often overlap is introduced
         "overlap_add_second_prob":      0.35,   # ↑ (was 0.22)
 
@@ -26,12 +26,12 @@ HPMOCD_CONFIG = {
     "overlap_support_margin":       2,     # used as k_min — keep at 2
     "early_stop_patience":          20,    # rolling window for stagnation
     
-    # ── NEW: explicit community control ──────────────────────────
+    # NEW: explicit community control
     "n_communities": 22,  # match LFR ground truth (CRITICAL)
 
     "target_overlap_rate": 0.20,
 
-    # # ── NEW: encourage exploration stability ─────────────────────
+    # NEW: encourage exploration stability
     # "early_stop_patience": 30,  # avoid early stagnation
 }
 
@@ -44,7 +44,7 @@ if os.environ.get("CI_DEV"):
         "n_threads": 1,
     })
 
-# ── LFR Benchmark parameters ─────────────────────────────────────────────────
+# LFR Benchmark parameters
 LFR_CONFIG = {
     "n":                  1000,  # number of nodes
     "tau1":               2.5,   # degree exponent
@@ -60,7 +60,7 @@ LFR_CONFIG = {
     "seed":               42,
 }
 
-# ── DBLP dataset ─────────────────────────────────────────────────────────────
+# DBLP dataset
 DBLP_CONFIG = {
     # SNAP DBLP ground-truth communities
     "url_graph":      "https://snap.stanford.edu/data/bigdata/communities/com-dblp.ungraph.txt.gz",
@@ -71,7 +71,7 @@ DBLP_CONFIG = {
     "seed":            42,
 }
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+# Evaluation
 EVAL_CONFIG = {
     "n_runs":   20,    # independent runs per configuration (paper standard)
     "alpha":    0.05,  # significance level for paired t-test

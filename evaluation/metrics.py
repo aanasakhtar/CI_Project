@@ -1,35 +1,12 @@
-"""
-evaluation/metrics.py
-─────────────────────
-Evaluation metrics for both disjoint and overlapping community detection.
+"""Evaluation metrics for disjoint and overlapping community detection.
 
-Disjoint metrics  : NMI, AMI, Modularity, F1 (pairwise)
-Overlapping metrics: Omega Index, Overlapping NMI (ONMI)
+Disjoint metrics: NMI, AMI, Modularity, Pairwise F1.
+Overlapping metrics: Omega Index, Overlapping NMI (ONMI).
 
-All functions accept communities as list[frozenset[int]].
-
-IMPORTANT — OVERLAPPING COVERS AND NMI
-───────────────────────────────────────
-Standard sklearn NMI requires a hard (disjoint) partition.  For overlapping
-predictions the naive approach of projecting each node to its "last seen"
-community produces a broken label array that systematically underestimates NMI.
-
-We handle this in two ways:
-
-  1. nmi()  — used for the table.  For overlapping covers we project each node
-     to its BEST-SUPPORTED community (using neighbourhood majority vote), which
-     is the same projection used inside the algorithm.  This gives a fair
-     comparison: the same projection is used for both eval and optimisation.
-
-  2. onmi() — true overlapping NMI as defined by McDaid et al. (2011).
-     Computes H(C|D) and H(D|C) using the cover membership vectors.
-     This is the gold-standard metric for overlapping CD evaluation.
-
-MODULARITY FOR OVERLAPPING COVERS
-──────────────────────────────────
-NetworkX modularity() requires a disjoint partition.  We project using the
-support-based hard partition (same as the algorithm) rather than first-seen,
-so the reported modularity matches what was actually optimised.
+For overlapping covers we project nodes to their best-supported community
+when computing projected metrics (NMI, Modularity) so reported values are
+consistent with the algorithm's internal projection. Use `onmi()` for the
+true overlapping NMI (McDaid et al., 2011).
 """
 
 from __future__ import annotations
@@ -40,7 +17,7 @@ from sklearn.metrics import normalized_mutual_info_score, adjusted_mutual_info_s
 from scipy.optimize import linear_sum_assignment
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# Helpers
 
 def _partition_to_label_array(
     communities: list[frozenset],
@@ -135,7 +112,7 @@ def _cover_to_hard_partition(
     return [frozenset(nodes) for _cid, nodes in sorted(groups.items())]
 
 
-# ── Disjoint metrics ─────────────────────────────────────────────────────────
+# Disjoint metrics
 
 def _is_overlapping(communities: list[frozenset]) -> bool:
     """Return True if any node appears in more than one community."""
@@ -238,7 +215,7 @@ def pairwise_f1(pred: list[frozenset], true: list[frozenset]) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-# ── Overlapping metric ────────────────────────────────────────────────────────
+# Overlapping metric
 
 def omega_index(pred: list[frozenset], true: list[frozenset]) -> float:
     """
@@ -399,7 +376,7 @@ def onmi(pred: list[frozenset], true: list[frozenset]) -> float:
     return float(1.0 - 0.5 * (norm_P.mean() + norm_T.mean()))
 
 
-# ── Convenience: run all metrics at once ─────────────────────────────────────
+# Convenience: run all metrics at once
 
 def evaluate_disjoint(
     G: nx.Graph,
@@ -430,7 +407,7 @@ def evaluate_overlapping(
     }
 
 
-# ── Quick self-test ───────────────────────────────────────────────────────────
+# Quick self-test
 if __name__ == "__main__":
     # Toy example: 6 nodes, 2 communities, node 2 overlaps
     true = [frozenset({0, 1, 2}), frozenset({2, 3, 4, 5})]

@@ -34,7 +34,7 @@ except ImportError:
 from config import HPMOCD_CONFIG
 
 
-# ── Main runner ──────────────────────────────────────────────────────────────
+# Main runner
 
 def run_hp_mocd(
     G: nx.Graph,
@@ -99,7 +99,7 @@ def run_hp_mocd(
     return best, pareto, runtime
 
 
-# ── Fallback: pure-Python NSGA-II skeleton (if hp-mocd unavailable) ─────────
+# Fallback: pure-Python NSGA-II skeleton (if hp-mocd unavailable)
 # Use this to understand the algorithm internals or to prototype your extension.
 
 def _evaluate(G: nx.Graph, partition: dict[int, int]) -> tuple[float, float]:
@@ -406,7 +406,7 @@ def run_minimal_nsgaii(
     return best, runtime
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry point
 if __name__ == "__main__":
     import sys
     sys.path.insert(0, "..")

@@ -1,13 +1,11 @@
-"""
-run_experiment.py
-═════════════════
+"""run_experiment.py
+
 Runs both the baseline HP-MOCD and the overlapping extension on both
 datasets (LFR and DBLP) and prints a comparison table.
 
 Place this file in the project root (same level as baseline/ and data/).
 
-Usage
------
+Usage:
     python run_experiment.py                  # both datasets, both methods
     python run_experiment.py --dataset lfr    # LFR only
     python run_experiment.py --dataset dblp   # DBLP only
@@ -19,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 
-# ── Make sure project root is on the path ────────────────────────────────────
+# Make sure project root is on the path
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -31,9 +29,7 @@ from evaluation.metrics              import evaluate_disjoint, evaluate_overlapp
 from evaluation.partition_utils      import save_partition_report
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
 
 def _print_scores(label: str, scores: dict[str, float]) -> None:
     """Print a metric dict in a readable table row."""
@@ -153,9 +149,7 @@ def _run_overlap_lfr(
     print(f"   Saved overlapping memberships: {overlapping_output}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  DATASET LOADERS
-# ══════════════════════════════════════════════════════════════════════════════
+# DATASET LOADERS
 
 def run_lfr(
     output_dir: Path,
@@ -205,9 +199,7 @@ def run_dblp(
     print(f"   Saved overlapping memberships: {overlapping_output}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run HP-MOCD comparison experiment")

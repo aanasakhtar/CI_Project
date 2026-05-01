@@ -379,9 +379,13 @@ class MCMOEA:
 
         return population[max(first_front, key=score)]
 
-    def run(self) -> list[frozenset]:
+    def run(self, return_history: bool = False) -> list[frozenset] | tuple[list[frozenset], list[dict[str, float]]]:
         population = self._initial_population()
         fitnesses = [self._evaluate(ind) for ind in population]
+        history: list[dict[str, float]] = []
+
+        def _composite(fit: Fitness) -> float:
+            return fit[0] + 0.8 * fit[1] + 1.5 * fit[2]
 
         print(
             f"[MCMOEA] Starting | pop={self.pop_size} | gen={self.max_gen} | "
@@ -397,8 +401,19 @@ class MCMOEA:
             offspring_fit = [self._evaluate(ind) for ind in offspring]
             population, fitnesses = self._select_next(population + offspring, fitnesses + offspring_fit)
 
+            scores = [_composite(fit) for fit in fitnesses]
+            best_score = min(scores)
+            avg_score = sum(scores) / max(1, len(scores))
+            best_so_far = best_score if not history else min(history[-1]["best_so_far"], best_score)
+            history.append({
+                "generation": float(gen + 1),
+                "avg_fitness": float(avg_score),
+                "best_fitness": float(best_score),
+                "best_so_far": float(best_so_far),
+            })
+
             if (gen + 1) % 10 == 0:
-                best = min(fitnesses, key=lambda fit: fit[0] + 0.8 * fit[1] + 1.5 * fit[2])
+                best = min(fitnesses, key=_composite)
                 print(
                     f"  gen {gen + 1:3d}/{self.max_gen} | "
                     f"f_mod={best[0]:.4f} f_edge={best[1]:.4f} f_complexity={best[2]:.4f}"
@@ -408,6 +423,8 @@ class MCMOEA:
         partition = _community_cover(best)
         overlapping_nodes = sum(1 for labels in best.values() if len(labels) > 1)
         print(f"[MCMOEA] Done | communities={len(partition)} | overlapping_nodes={overlapping_nodes}")
+        if return_history:
+            return partition, history
         return partition
 
 
@@ -416,7 +433,7 @@ def run_mcmoea(
     cfg: dict = HPMOCD_CONFIG,
     max_memberships: int = 2,
     n_communities: int | None = None,
-) -> tuple[list[frozenset], float]:
+) -> tuple[list[frozenset], float] | tuple[list[frozenset], float, list[dict[str, float]]]:
     t0 = time.perf_counter()
     model = MCMOEA(
         G,
@@ -424,10 +441,33 @@ def run_mcmoea(
         max_memberships=max_memberships,
         n_communities=n_communities,
     )
-    partition = model.run()
+    result = model.run(return_history=False)
     runtime = time.perf_counter() - t0
+    if isinstance(result, tuple):
+        partition = result[0]
+    else:
+        partition = result
     print(f"[MCMOEA] communities={len(partition)}, runtime={runtime:.2f}s")
     return partition, runtime
+
+
+def run_mcmoea_with_history(
+    G: nx.Graph,
+    cfg: dict = HPMOCD_CONFIG,
+    max_memberships: int = 2,
+    n_communities: int | None = None,
+) -> tuple[list[frozenset], float, list[dict[str, float]]]:
+    t0 = time.perf_counter()
+    model = MCMOEA(
+        G,
+        cfg=cfg,
+        max_memberships=max_memberships,
+        n_communities=n_communities,
+    )
+    partition, history = model.run(return_history=True)
+    runtime = time.perf_counter() - t0
+    print(f"[MCMOEA] communities={len(partition)}, runtime={runtime:.2f}s")
+    return partition, runtime, history
 
 
 if __name__ == "__main__":

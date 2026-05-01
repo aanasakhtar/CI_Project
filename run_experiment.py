@@ -1,21 +1,18 @@
-"""
-run_experiment.py
-═════════════════
+"""run_experiment.py
+
 Runs all five methods on both datasets and prints a comparison table.
 
-Methods compared
-────────────────
-  1. HP-MOCD baseline      — disjoint, evolutionary (pymocd / MinimalNSGAII)
-  2. Overlapping extension — overlapping, evolutionary (your extension)
-  3. MCMOEA                - overlapping, multi-community evolutionary
-  4. CPM original          — overlapping, structural, NCN problem present
-  5. CPM NCN-fixed         — overlapping, structural, all nodes covered
+Methods compared:
+    1. HP-MOCD baseline      - disjoint, evolutionary (pymocd / MinimalNSGAII)
+    2. Overlapping extension - overlapping, evolutionary (your extension)
+    3. MCMOEA                - overlapping, multi-community evolutionary
+    4. CPM original          - overlapping, structural, NCN problem present
+    5. CPM NCN-fixed         - overlapping, structural, all nodes covered
 
-Usage
-─────
-    python run_experiment.py                  # both datasets
-    python run_experiment.py --dataset lfr
-    python run_experiment.py --dataset dblp
+Usage:
+        python run_experiment.py                  # both datasets
+        python run_experiment.py --dataset lfr
+        python run_experiment.py --dataset dblp
 """
 
 import sys
@@ -31,15 +28,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import networkx as nx
 
 from HPMOCD.hp_mocd_baseline        import run_hp_mocd
-from HPMOCD.hp_mocd_overlapping     import run_hp_mocd_overlapping
-from HPMOCD.mcmoea                  import run_mcmoea
+from HPMOCD.hp_mocd_overlapping     import run_hp_mocd_overlapping_with_history
+from HPMOCD.mcmoea                  import run_mcmoea_with_history
 from HPMOCD.cpm_community_detection import run_cpm_original, run_cpm_ncn_fixed
 from evaluation.metrics               import evaluate_disjoint, evaluate_overlapping
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
 
 def _count_overlapping_nodes(partition: list[frozenset]) -> int:
     node_counts: Counter = Counter()
@@ -73,6 +68,21 @@ def _save_memberships(
     print(f"   Saved memberships: {path}")
 
 
+def _save_history(
+    history: list[dict],
+    label: str,
+    dataset_slug: str,
+    output_dir: str = "outputs",
+) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    safe_dataset = dataset_slug.lower().replace(" ", "_")
+    safe_label = label.lower().replace(" ", "_").replace("-", "_")
+    path = os.path.join(output_dir, f"{safe_dataset}_{safe_label}_convergence.json")
+    with open(path, "w") as f:
+        json.dump(history, f)
+    print(f"   Saved convergence history: {path}")
+
+
 def _print_method_result(
     label: str,
     partition: list[frozenset],
@@ -95,7 +105,7 @@ def _print_method_result(
 
 def _print_comparison_table(results: list[dict], metrics: list[str]) -> None:
     col_w   = 16
-    label_w = 22
+    label_w = 20
     width   = label_w + col_w * len(results) + 4
 
     print(f"\n{'-' * width}")
@@ -146,14 +156,13 @@ def _print_comparison_table(results: list[dict], metrics: list[str]) -> None:
     print("  < = best value for that metric\n")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CORE: run all methods on one graph
-# ══════════════════════════════════════════════════════════════════════════════
+# CORE: run all methods on one graph
 
 def _run_all_methods(
     G: nx.Graph,
     ground_truth: list[frozenset],
     dataset_name: str,
+    dataset_slug: str,
     is_overlapping_gt: bool,
 ) -> None:
     n_nodes = G.number_of_nodes()
@@ -170,7 +179,7 @@ def _run_all_methods(
     evaluate_fn = evaluate_overlapping if is_overlapping_gt else evaluate_disjoint
     results = []
 
-    # ── 1. HP-MOCD baseline ───────────────────────────────────────────────────
+    # 1. HP-MOCD baseline
     print("\n>> Running HP-MOCD baseline (disjoint) ...")
     p_base, _, rt_base = run_hp_mocd(G)
     s_base = evaluate_fn(G, p_base, ground_truth)
@@ -184,12 +193,13 @@ def _run_all_methods(
         "n_assigned":    _count_assigned_nodes(p_base),
     })
 
-    # ── 2. Overlapping extension ──────────────────────────────────────────────
+    # 2. Overlapping extension
     print("\n>> Running overlapping HP-MOCD extension ...")
-    p_ovlp, rt_ovlp = run_hp_mocd_overlapping(G, max_memberships=2)
+    p_ovlp, rt_ovlp, hist_ovlp = run_hp_mocd_overlapping_with_history(G, max_memberships=2)
     s_ovlp = evaluate_fn(G, p_ovlp, ground_truth)
     _print_method_result("HP-MOCD Overlapping", p_ovlp, rt_ovlp, n_nodes, s_ovlp)
     _save_memberships(p_ovlp, "overlapping", dataset_name)
+    _save_history(hist_ovlp, "overlapping", dataset_slug)
     results.append({
         "label": "HP-MOCD-Ovlp",
         "scores": s_ovlp, "runtime": rt_ovlp,
@@ -198,12 +208,13 @@ def _run_all_methods(
         "n_assigned":    _count_assigned_nodes(p_ovlp),
     })
 
-    # -- 3. MCMOEA ------------------------------------------------------------
+    # 3. MCMOEA
     print("\n>> Running MCMOEA (multi-community multi-objective evolutionary) ...")
-    p_mcmoea, rt_mcmoea = run_mcmoea(G, max_memberships=2)
+    p_mcmoea, rt_mcmoea, hist_mcmoea = run_mcmoea_with_history(G, max_memberships=2)
     s_mcmoea = evaluate_fn(G, p_mcmoea, ground_truth)
     _print_method_result("MCMOEA", p_mcmoea, rt_mcmoea, n_nodes, s_mcmoea)
     _save_memberships(p_mcmoea, "mcmoea", dataset_name)
+    _save_history(hist_mcmoea, "mcmoea", dataset_slug)
     results.append({
         "label": "MCMOEA",
         "scores": s_mcmoea, "runtime": rt_mcmoea,
@@ -232,7 +243,7 @@ def _run_all_methods(
         "n_assigned":    _count_assigned_nodes(p_cpm_orig),
     })
 
-    # ── 4. CPM NCN-fixed ──────────────────────────────────────────────────────
+    # 4. CPM NCN-fixed
     print("\n>> Running CPM NCN-fixed (all nodes assigned) ...")
     p_cpm_fix, rt_cpm_fix, k_fix = run_cpm_ncn_fixed(G)
     s_cpm_fix = evaluate_fn(G, p_cpm_fix, ground_truth)
@@ -248,13 +259,11 @@ def _run_all_methods(
         "n_assigned":    _count_assigned_nodes(p_cpm_fix),
     })
 
-    # ── Comparison table ──────────────────────────────────────────────────────
+    # Comparison table
     _print_comparison_table(results, list(s_base.keys()))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  DATASET RUNNERS
-# ══════════════════════════════════════════════════════════════════════════════
+# DATASET RUNNERS
 
 def run_lfr() -> None:
     print("\nLoading LFR benchmark ...")
@@ -269,19 +278,17 @@ def run_lfr() -> None:
         G, ground_truth = load_lfr_disjoint()
         label = "LFR Disjoint Benchmark"
         is_overlapping = False
-    _run_all_methods(G, ground_truth, label, is_overlapping_gt=is_overlapping)
+    _run_all_methods(G, ground_truth, label, "lfr", is_overlapping_gt=is_overlapping)
 
 
 def run_dblp() -> None:
     print("\nLoading DBLP ...")
     from data.load_dblp import load_dblp
     G, ground_truth = load_dblp()
-    _run_all_methods(G, ground_truth, "DBLP Co-authorship", is_overlapping_gt=True)
+    _run_all_methods(G, ground_truth, "DBLP Co-authorship", "dblp", is_overlapping_gt=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+# ENTRY POINT
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

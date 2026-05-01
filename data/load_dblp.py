@@ -100,7 +100,7 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
     _download(graph_url, graph_gz)
     _download(cmty_url,  cmty_gz)
 
-    # ── Load edges ────────────────────────────────────────────────────────────
+    # Load edges
     print("Parsing edge list ...")
     G = nx.Graph()
     with gzip.open(graph_gz, "rt") as f:
@@ -111,7 +111,7 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
             G.add_edge(u, v)
     print(f"  Full graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
-    # ── Optional subsampling (BFS from random seed) ───────────────────────────
+    # Optional subsampling (BFS from random seed)
     subsample = cfg.get("subsample_nodes")
     if subsample and G.number_of_nodes() > subsample:
         rng = random.Random(cfg["seed"])
@@ -122,7 +122,7 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
 
     node_set = set(G.nodes())
 
-    # ── Load ground-truth communities (filter to subgraph) ───────────────────
+    # Load ground-truth communities (filter to subgraph)
     print("Parsing community file ...")
     communities: list[frozenset] = []
 
@@ -166,7 +166,7 @@ def load_dblp(cfg: dict = DBLP_CONFIG) -> tuple[nx.Graph, list[frozenset]]:
     return G, communities
 
 
-# ── Quick sanity check ───────────────────────────────────────────────────────
+# Quick sanity check
 if __name__ == "__main__":
     G, cmty = load_dblp()
     print(f"\nReady: G has {G.number_of_nodes()} nodes, "

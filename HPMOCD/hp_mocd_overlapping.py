@@ -1,62 +1,28 @@
-"""
-hp_mocd_overlapping.py  (v3 — overlap-aware)
-══════════════════════════════════════════════
+"""hp_mocd_overlapping.py (v3 - overlap-aware)
+
 Overlapping community detection as a multi-objective NSGA-II extension of
 HP-MOCD.
 
-ROOT CAUSE OF v2 FAILURE (0 overlapping nodes)
-───────────────────────────────────────────────
-v2 removed f_gap entirely, eliminating ALL pressure toward overlap.
-Pure structural objectives (modularity, conductance) are perfectly satisfied
-by a clean disjoint partition — so the algorithm trivially converged to one.
-The add_secondary mutation existed but was too strict (k_min + ratio threshold
-meant it almost never fired in practice), and 25 % of mutations were remove_
-secondary, actively pruning any overlap that appeared.
+Root cause of v2 failure (0 overlapping nodes):
+    v2 removed f_gap entirely, eliminating pressure toward overlap. Pure
+    structural objectives are satisfied by a disjoint partition so the
+    algorithm converged to disjoint solutions. Operator thresholds were
+    adjusted in v3 to encourage overlap.
 
-THREE-OBJECTIVE DESIGN (v3)
-───────────────────────────
-f1: 1 − modularity          — structure quality (hard projection)
-f2: mean conductance        — community tightness (hard projection)
-f3: overlap quality loss    — NEW: rewards well-supported overlap,
-                              penalises zero-overlap AND unsupported overlap.
-                              Range [0,1].  A perfect disjoint solution scores
-                              f3 = 1.0 (no overlap at all = maximum loss).
-                              A solution with ~20 % well-supported overlap
-                              scores f3 ≈ 0.0.
+Three-objective design (v3):
+    f1: 1 - modularity (structure quality)
+    f2: mean conductance (community tightness)
+    f3: overlap quality loss (rewards well-supported overlap, penalises
+            zero or unsupported overlap). Range [0,1].
 
-f3 DESIGN IN DETAIL
-───────────────────
-f3 has two additive components:
+Operator fixes:
+    - add_secondary probability raised to 40% (was 30%)
+    - thresholds relaxed (k_min reduced, support ratio relaxed)
+    - remove_secondary reduced to 15% (was 25%)
 
-  (a) no_overlap_penalty:
-        = max(0,  target_rate − actual_rate) / target_rate
-        Penalises having FEWER overlapping nodes than the soft target.
-        Goes to 0 once actual_rate >= target_rate.
-        This is a SOFT floor, not a hard constraint.
-
-  (b) unsupported_overlap_penalty:
-        For each overlapping node, ratio = min_support / max_support.
-        Penalises memberships where ratio < threshold (random overlap).
-        Goes to 0 for a well-supported overlap node.
-
-  f3 = 0.5 * no_overlap_penalty + 0.5 * unsupported_penalty
-
-This creates the right gradient:
-  - Disjoint → f3 = 0.5 (from no_overlap alone) → pressure to add overlap
-  - Random overlap → f3 high (both terms active) → pressure to fix placement
-  - Good overlap → f3 ≈ 0 → no pressure, keeps what it has
-
-OPERATOR FIX
-────────────
-  add_secondary probability raised to 40 % (was 30 %).
-  Thresholds relaxed: k_min=1, support_ratio=0.20 (was k_min=2, ratio=0.30).
-  remove_secondary reduced to 15 % (was 25 %) — stops pruning what f3 builds.
-
-INTERFACE (unchanged — drop-in replacement)
-───────────────────────────────────────────
-    from HPMOCD.hp_mocd_overlapping import run_hp_mocd_overlapping
-
-    partition, runtime = run_hp_mocd_overlapping(G, max_memberships=2)
+Interface (unchanged):
+        from HPMOCD.hp_mocd_overlapping import run_hp_mocd_overlapping
+        partition, runtime = run_hp_mocd_overlapping(G, max_memberships=2)
 """
 
 from __future__ import annotations
@@ -77,9 +43,7 @@ from config import HPMOCD_CONFIG
 from HPMOCD.hp_mocd_baseline import run_minimal_nsgaii
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — REPRESENTATION HELPERS  (unchanged from v1)
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 - REPRESENTATION HELPERS (unchanged from v1)
 
 def _resolve_n_communities(G: nx.Graph, cfg: dict, n_communities: int | None) -> int:
     if n_communities is None:
@@ -134,9 +98,7 @@ def _hard_partition_from_overlapping(
     return [frozenset(nodes) for _cid, nodes in sorted(grouped.items())]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — OBJECTIVES  (redesigned)
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 - OBJECTIVES (redesigned)
 
 def _modularity_objective(
     G: nx.Graph,
@@ -294,9 +256,7 @@ def _evaluate_objectives(
     return (f1, f2, f3)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — OPERATORS  (rebalanced + guided add)
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 - OPERATORS (rebalanced + guided add)
 
 def _op_boundary_reassign(
     partition: dict[int, set[int]],
@@ -495,9 +455,7 @@ def _mutate(
     return child, max_label_id
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — CROSSOVER  (identical logic to v1, kept for reference)
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 - CROSSOVER (identical logic to v1, kept for reference)
 
 def _topology_aware_crossover(
     parent1: dict[int, set[int]],
@@ -541,9 +499,7 @@ def _topology_aware_crossover(
     return child
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 5 — NSGA-II CORE
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 - NSGA-II CORE
 
 class OverlappingNSGAII:
     """
@@ -602,7 +558,7 @@ class OverlappingNSGAII:
         self.fitness_cache: dict[tuple, tuple[float, float, float]] = {}
         self._external_seed_partition = seed_partition
 
-    # ── Dominance / sorting ─────────────────────────────────────────────────
+    # -- Dominance / sorting
 
     @staticmethod
     def _dominates(a: tuple[float, ...], b: tuple[float, ...]) -> bool:
@@ -661,7 +617,7 @@ class OverlappingNSGAII:
                 ) / span
         return distances
 
-    # ── Fitness evaluation ──────────────────────────────────────────────────
+    # -- Fitness evaluation
 
     def _evaluate(self, individual: dict[int, set[int]]) -> tuple[float, float, float]:
         sig = _partition_signature(individual)
@@ -675,7 +631,7 @@ class OverlappingNSGAII:
         self.fitness_cache[sig] = fit
         return fit
 
-    # ── Population initialisation (diversified seeding) ─────────────────────
+    # -- Population initialisation (diversified seeding)
 
     def _guided_overlap_injection(
         self, base: dict[int, set[int]]
@@ -864,9 +820,10 @@ class OverlappingNSGAII:
 
     # ── Main loop ────────────────────────────────────────────────────────────
 
-    def run(self) -> list[frozenset]:
+    def run(self, return_history: bool = False) -> list[frozenset] | tuple[list[frozenset], list[dict[str, float]]]:
         population = self._seed_population()
         fitnesses = [self._evaluate(ind) for ind in population]
+        history: list[dict[str, float]] = []
 
         # ══════════════════════════════════════════════════════════════════
         # TWO-PHASE EVOLUTION
@@ -958,6 +915,18 @@ class OverlappingNSGAII:
                 combined_fit.append(self._evaluate(rnd))
             population, fitnesses = self._next_population(combined, combined_fit)
 
+            scores = [_composite(fit) for fit in fitnesses]
+            best_score = min(scores)
+            avg_score = sum(scores) / max(1, len(scores))
+            best_so_far = best_score if not history else min(history[-1]["best_so_far"], best_score)
+            history.append({
+                "generation": float(gen + 1),
+                "avg_fitness": float(avg_score),
+                "best_fitness": float(best_score),
+                "best_so_far": float(best_so_far),
+                "phase": 1.0 if in_phase1 else 2.0,
+            })
+
             # ── Phase transition ──────────────────────────────────────────
             if gen + 1 == phase1_gens:
                 best_f1_now = min(f[0] for f in fitnesses)
@@ -994,6 +963,8 @@ class OverlappingNSGAII:
             f"[OverlappingNSGAII-v3] Done | "
             f"communities={len(result)} | overlapping_nodes={overlap_nodes}"
         )
+        if return_history:
+            return result, history
         return result
 
 
@@ -1036,6 +1007,27 @@ def run_hp_mocd_overlapping(
     runtime = time.perf_counter() - t0
     print(f"[HP-MOCD Overlapping v3] communities={len(best)}, runtime={runtime:.2f}s")
     return best, runtime
+
+
+def run_hp_mocd_overlapping_with_history(
+    G: nx.Graph,
+    cfg: dict = HPMOCD_CONFIG,
+    max_memberships: int = 2,
+    n_communities: int | None = None,
+    seed_partition: list[frozenset] | None = None,
+) -> tuple[list[frozenset], float, list[dict[str, float]]]:
+    t0 = time.perf_counter()
+    model = OverlappingNSGAII(
+        G,
+        cfg=cfg,
+        max_memberships=max_memberships,
+        n_communities=n_communities,
+        seed_partition=seed_partition,
+    )
+    best, history = model.run(return_history=True)
+    runtime = time.perf_counter() - t0
+    print(f"[HP-MOCD Overlapping v3] communities={len(best)}, runtime={runtime:.2f}s")
+    return best, runtime, history
 
 
 if __name__ == "__main__":

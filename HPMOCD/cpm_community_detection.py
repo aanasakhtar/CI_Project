@@ -61,9 +61,7 @@ from collections import Counter
 import networkx as nx
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 1 — K SELECTION
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1 - K SELECTION
 
 def _select_best_k(
     G: nx.Graph,
@@ -125,9 +123,7 @@ def _select_best_k(
     return best_k, best_partition
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 2 — NCN RECOVERY
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2 - NCN RECOVERY
 
 def _recover_unassigned_nodes(
     G: nx.Graph,
@@ -190,9 +186,7 @@ def _recover_unassigned_nodes(
     return [frozenset(c) for c in mutable_communities if c]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 3 — VERSION 1: ORIGINAL CPM (with NCN problem)
-# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 3 - VERSION 1: ORIGINAL CPM (with NCN problem)
 
 def run_cpm_original(
     G: nx.Graph,
@@ -248,7 +242,7 @@ def run_cpm_original(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SECTION 4 — VERSION 2: CPM WITH NCN FIX
+# SECTION 4 - VERSION 2: CPM WITH NCN FIX
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_cpm_ncn_fixed(
